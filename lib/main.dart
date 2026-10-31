@@ -20,6 +20,8 @@ import 'data/secure_card_data.dart';
 import 'features/cards/credit_card.dart';
 import 'features/cards/card_catalogue.dart';
 import 'features/cards/card_catalogue_page.dart';
+import 'features/cards/card_catalogue_service.dart';
+import 'features/cards/card_wallet_stack.dart';
 import 'features/assistant/ai_chat_page.dart';
 import 'features/compare/compare_page.dart';
 import 'features/security/app_lock.dart';
@@ -145,8 +147,7 @@ class CardyHome extends StatefulWidget {
 
 class _CardyHomeState extends State<CardyHome> {
   final math.Random _styleRandom = math.Random.secure();
-  final PageController _walletPageController =
-      PageController(viewportFraction: .82);
+  int _walletResetKey = 0;
   int tab = 0;
   bool loaded = false;
   Timer? _clipboardClearTimer;
@@ -164,14 +165,12 @@ class _CardyHomeState extends State<CardyHome> {
   @override
   void dispose() {
     _clipboardClearTimer?.cancel();
-    _walletPageController.dispose();
     super.dispose();
   }
 
   void _resetWalletPage() {
-    if (_walletPageController.hasClients) {
-      _walletPageController.jumpToPage(0);
-    }
+    if (!mounted) return;
+    setState(() => _walletResetKey++);
   }
 
   Future<void> _load() async {
@@ -182,42 +181,16 @@ class _CardyHomeState extends State<CardyHome> {
       var saved = (await database.query('cards', orderBy: 'id'))
           .map(CreditCard.fromDatabase)
           .toList();
-      var removedLegacyCvv = false;
       for (final card in saved) {
         if (card.secureDetails.isNotEmpty) {
           try {
             final details = await SecureCardData.decrypt(card.secureDetails);
             card.cardNumber = details['number']!;
             card.expiryDate = details['expiry']!;
-            // CVV values from earlier versions are deliberately discarded.
-            if (details.containsKey('cvv')) {
-              removedLegacyCvv = true;
-              card.secureDetails =
-                  card.cardNumber.isEmpty && card.expiryDate.isEmpty
-                      ? ''
-                      : await SecureCardData.encrypt(
-                          number: card.cardNumber,
-                          expiry: card.expiryDate,
-                        );
-              if (card.databaseId != null) {
-                await database.update(
-                  'cards',
-                  {'secure_details': card.secureDetails},
-                  where: 'id = ?',
-                  whereArgs: [card.databaseId],
-                );
-              }
-            }
+            card.cvv = details['cvv']!;
           } catch (_) {
             // Keep the rest of the local card usable if secure data cannot be read.
           }
-        }
-      }
-      if (removedLegacyCvv) {
-        try {
-          await database.rawQuery('PRAGMA wal_checkpoint(TRUNCATE)');
-        } catch (_) {
-          // The platform may use a journal mode without WAL checkpoint support.
         }
       }
       if (saved.isEmpty) {
@@ -232,7 +205,7 @@ class _CardyHomeState extends State<CardyHome> {
               final details = await SecureCardData.decrypt(card.secureDetails);
               card.cardNumber = details['number']!;
               card.expiryDate = details['expiry']!;
-              card.cvv = '';
+              card.cvv = details['cvv']!;
             } catch (error) {
               throw StateError(
                   'Could not migrate encrypted legacy card data: $error');
@@ -269,10 +242,13 @@ class _CardyHomeState extends State<CardyHome> {
 
   Future<void> _persistCard(CreditCard card, {bool notify = true}) async {
     final database = await LocalDatabase.instance.database;
-    if (card.cardNumber.isNotEmpty || card.expiryDate.isNotEmpty) {
+    if (card.cardNumber.isNotEmpty ||
+        card.expiryDate.isNotEmpty ||
+        card.cvv.isNotEmpty) {
       card.secureDetails = await SecureCardData.encrypt(
         number: card.cardNumber,
         expiry: card.expiryDate,
+        cvv: card.cvv,
       );
     } else {
       // Clear the encrypted blob too, so cleared fields cannot return later.
@@ -304,10 +280,13 @@ class _CardyHomeState extends State<CardyHome> {
     // the transaction on some Android/plugin combinations.
     final rows = <Map<String, Object?>>[];
     for (final card in values) {
-      if (card.cardNumber.isNotEmpty || card.expiryDate.isNotEmpty) {
+      if (card.cardNumber.isNotEmpty ||
+          card.expiryDate.isNotEmpty ||
+          card.cvv.isNotEmpty) {
         card.secureDetails = await SecureCardData.encrypt(
           number: card.cardNumber,
           expiry: card.expiryDate,
+          cvv: card.cvv,
         );
       } else {
         card.secureDetails = '';
@@ -734,73 +713,41 @@ class _CardyHomeState extends State<CardyHome> {
                 child: Text('No cards match these filters.',
                     style: TextStyle(color: muted))),
           )
-        else
+        else if (filteredCards.length == 1)
           SizedBox(
             height: 370,
-            child: filteredCards.length == 1
-                ? Center(
-                    child: _cardTile(
-                      filteredCards.single,
-                      width: double.infinity,
-                      styleSeed: filteredCards.single.styleSeed,
-                      onTap: () => _cardDetails(filteredCards.single,
-                          cards.indexOf(filteredCards.single)),
-                    ),
-                  )
-                : PageView.builder(
-                    controller: _walletPageController,
-                    itemCount: filteredCards.length,
-                    physics: const BouncingScrollPhysics(),
-                    clipBehavior: Clip.none,
-                    itemBuilder: (context, index) {
-                      final card = filteredCards[index];
-                      final originalIndex = cards.indexOf(card);
-                      return AnimatedBuilder(
-                        animation: _walletPageController,
-                        builder: (context, child) {
-                          final page = _walletPageController.hasClients
-                              ? (_walletPageController.page ?? 0)
-                              : 0.0;
-                          final offset = (page - index).clamp(-1.0, 1.0);
-                          final distance = offset.abs();
-                          return Transform(
-                            alignment: Alignment.center,
-                            transform: Matrix4.identity()
-                              ..setEntry(3, 2, .0014)
-                              ..rotateY(-offset * .48),
-                            child: Transform.translate(
-                              offset: Offset(0, distance * 10),
-                              child: Transform.scale(
-                                scale: 1 - distance * .14,
-                                child: child,
-                              ),
-                            ),
-                          );
-                        },
-                        child: LayoutBuilder(
-                          builder: (context, constraints) => Center(
-                            child: Hero(
-                              tag:
-                                  'wallet-card-${card.databaseId ?? identityHashCode(card)}',
-                              child: _cardTile(
-                                card,
-                                width: constraints.maxWidth,
-                                styleSeed: card.styleSeed,
-                                onTap: () => _cardDetails(card, originalIndex),
-                              ),
-                            ),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
+            child: Center(
+              child: _cardTile(
+                filteredCards.single,
+                width: double.infinity,
+                styleSeed: filteredCards.single.styleSeed,
+                onTap: () => _cardDetails(filteredCards.single,
+                    cards.indexOf(filteredCards.single)),
+              ),
+            ),
+          )
+        else
+          CardWalletStack(
+            key: ValueKey(_walletResetKey),
+            cards: filteredCards,
+            cardBuilder: (card, width, front) => Hero(
+              tag: 'wallet-card-${card.databaseId ?? identityHashCode(card)}',
+              child: _cardTile(
+                card,
+                width: width,
+                styleSeed: card.styleSeed,
+                showCaption: false,
+                onTap:
+                    front ? () => _cardDetails(card, cards.indexOf(card)) : null,
+              ),
+            ),
           ),
         if (filteredCards.length > 1)
           Padding(
             padding: const EdgeInsets.only(top: 4),
             child: Center(
               child: Text(
-                'Swipe a card to view the next one',
+                'Swipe up or down to browse cards',
                 style: TextStyle(color: muted, fontSize: 12),
               ),
             ),
@@ -904,6 +851,7 @@ class _CardyHomeState extends State<CardyHome> {
     required double width,
     required int styleSeed,
     VoidCallback? onTap,
+    bool showCaption = true,
   }) {
     final widthInsideLimit = width.isFinite && width < 300 ? width : 300.0;
     final digits = c.cardNumber.replaceAll(RegExp(r'\D'), '');
@@ -962,32 +910,34 @@ class _CardyHomeState extends State<CardyHome> {
                           ),
                   ),
           ),
-          const SizedBox(height: 4),
-          SizedBox(
-            width: widthInsideLimit,
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '${c.bank} · ${c.name} · ${c.network}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: muted, fontSize: 11),
+          if (showCaption) ...[
+            const SizedBox(height: 4),
+            SizedBox(
+              width: widthInsideLimit,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '${c.bank} · ${c.name} · ${c.network}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: muted, fontSize: 11),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  c.active ? 'ACTIVE' : 'PAUSED',
-                  style: TextStyle(
-                    color: c.active ? const Color(0xFF7DE0A1) : muted,
-                    fontSize: 10,
-                    letterSpacing: 1,
-                    fontWeight: FontWeight.w700,
+                  const SizedBox(width: 8),
+                  Text(
+                    c.active ? 'ACTIVE' : 'PAUSED',
+                    style: TextStyle(
+                      color: c.active ? const Color(0xFF7DE0A1) : muted,
+                      fontSize: 10,
+                      letterSpacing: 1,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
+          ],
         ],
       ),
     );
@@ -1020,46 +970,11 @@ class _CardyHomeState extends State<CardyHome> {
               fit: BoxFit.cover,
               errorBuilder: (_, __, ___) =>
                   Container(color: const Color(0xFF252936))),
-          const DecoratedBox(
-              decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [Color(0x99000000), Color(0x22000000), Color(0xDD000000)],
-              stops: [0, .46, 1],
-            ),
-          )),
           Padding(
             padding: const EdgeInsets.fromLTRB(18, 15, 18, 14),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(bank.isEmpty ? 'CARD' : bank.toUpperCase(),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: textStyle.copyWith(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 1.1)),
-                        const SizedBox(height: 3),
-                        Text(variant.toUpperCase(),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: textStyle.copyWith(
-                                fontSize: 9,
-                                fontWeight: FontWeight.w500,
-                                letterSpacing: .7)),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  _networkWordmark(network, textStyle),
-                ]),
                 const Spacer(),
                 Text(masked,
                     style: textStyle.copyWith(
@@ -1426,27 +1341,36 @@ class _CardyHomeState extends State<CardyHome> {
       String? scannedNetwork}) async {
     final styleSeed = existing?.styleSeed ?? _newCardStyleSeed();
     final form = GlobalKey<FormState>();
-    final catalogNotes = catalogue == null
+    String cardNotes(CardCatalogEntry? entry) => entry == null
         ? ''
         : [
-            catalogue.summary,
-            if (catalogue.details['Key Highlights']?.isNotEmpty == true)
-              'Key highlights: ${catalogue.details['Key Highlights']}',
-            'Reference: ${catalogue.detailUrl}',
+            entry.summary,
+            if (entry.details['Key Highlights']?.isNotEmpty == true)
+              'Key highlights: ${entry.details['Key Highlights']}',
+            'Reference: ${entry.detailUrl}',
           ].where((value) => value.trim().isNotEmpty).join('\n\n');
-    final catalogNetwork = (catalogue?.details['Network'] ?? '').toLowerCase();
-    final prefNetwork = catalogNetwork.contains('mastercard')
-        ? 'Mastercard'
-        : catalogNetwork.contains('diners')
-            ? 'Diners Club International'
-            : catalogNetwork.contains('rupay')
-                ? 'RuPay'
-                : (catalogNetwork.contains('amex') ||
-                        catalogNetwork.contains('american express'))
-                    ? 'American Express'
-                    : catalogNetwork.contains('visa')
-                        ? 'Visa'
-                        : 'Other';
+    const manualChoice = '__manual__';
+    String? bankChoice, nameChoice;
+    CardCatalogEntry? selectedEntry;
+    final catalogCards = <CardCatalogEntry>[];
+    void Function(void Function())? sheetRefresh;
+    String networkFromCatalog(CardCatalogEntry? entry) {
+      final raw = (entry?.details['Network'] ?? '').toLowerCase();
+      return raw.contains('mastercard')
+          ? 'Mastercard'
+          : raw.contains('diners')
+              ? 'Diners Club International'
+              : raw.contains('rupay')
+                  ? 'RuPay'
+                  : (raw.contains('amex') ||
+                          raw.contains('american express'))
+                      ? 'American Express'
+                      : raw.contains('visa')
+                          ? 'Visa'
+                          : 'Other';
+    }
+
+    final prefNetwork = networkFromCatalog(catalogue);
     final bank = TextEditingController(text: existing?.bank ?? catalogue?.bank),
         name = TextEditingController(text: existing?.name ?? catalogue?.name),
         cardNumber = TextEditingController(
@@ -1464,6 +1388,39 @@ class _CardyHomeState extends State<CardyHome> {
     String? artworkPath = existing?.artworkPath;
     String? pickedArtworkPath;
     Future<dynamic>? sheetTransitionCompleted;
+    () async {
+      try {
+        catalogCards.addAll(await CardCatalogueService.instance.list());
+      } catch (_) {}
+      final banks = catalogCards
+          .map((entry) => entry.bank)
+          .where((bank) => bank.isNotEmpty)
+          .toSet()
+          .toList()
+        ..sort();
+      final seedBank = bank.text.trim();
+      if (seedBank.isNotEmpty) {
+        bankChoice = banks.contains(seedBank) ? seedBank : manualChoice;
+        if (bankChoice != manualChoice) {
+          final names = catalogCards
+              .where((entry) => entry.bank == bankChoice)
+              .map((entry) => entry.name)
+              .toSet()
+              .toList()
+            ..sort();
+          final seedName = name.text.trim();
+          nameChoice = names.contains(seedName) ? seedName : null;
+          if (nameChoice != null) {
+            selectedEntry = catalogCards.firstWhere(
+              (entry) =>
+                  entry.bank == bankChoice && entry.name == nameChoice,
+            );
+          }
+        }
+      }
+      final refresh = sheetRefresh;
+      if (refresh != null) refresh(() {});
+    }();
     await Navigator.of(context).push<void>(
       cardyPageRoute<void>((ctx) {
         sheetTransitionCompleted = ModalRoute.of(ctx)?.completed;
@@ -1473,347 +1430,485 @@ class _CardyHomeState extends State<CardyHome> {
           ),
           body: SafeArea(
             child: StatefulBuilder(
-              builder: (ctx, setSheet) => Padding(
-                padding: EdgeInsets.fromLTRB(
-                  20,
-                  18,
-                  20,
-                  MediaQuery.of(ctx).viewInsets.bottom + 20,
-                ),
-                child: Form(
-                  key: form,
-                  child: SingleChildScrollView(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Sensitive details are kept on this device.',
-                            style: TextStyle(color: muted)),
-                        const SizedBox(height: 16),
-                        _cardPreview(
-                          bank: bank.text,
-                          name: name.text,
-                          nickname: existing?.nickname ?? '',
-                          number: cardNumber.text,
-                          expiry: expiry.text,
-                          network: network,
-                          styleSeed: styleSeed,
-                          showBack: false,
-                          cvv: cvv.text,
-                          artworkPath: artworkPath,
-                        ),
-                        const SizedBox(height: 8),
-                        Wrap(spacing: 8, children: [
-                          OutlinedButton.icon(
-                            onPressed: () async {
-                              final image = await ImagePicker().pickImage(
-                                source: ImageSource.gallery,
-                                maxWidth: 1600,
-                                imageQuality: 92,
-                              );
-                              if (image == null) return;
-                              setSheet(() {
-                                artworkPath = image.path;
-                                pickedArtworkPath = image.path;
-                              });
-                            },
-                            icon: const HugeIcon(
-                                icon: HugeIcons.strokeRoundedImage01),
-                            label: Text(artworkPath == null
-                                ? 'Choose card image'
-                                : 'Change image'),
+              builder: (ctx, setSheet) {
+                sheetRefresh = setSheet;
+                return Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    20,
+                    18,
+                    20,
+                    MediaQuery.of(ctx).viewInsets.bottom + 20,
+                  ),
+                  child: Form(
+                    key: form,
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Sensitive details are kept on this device.',
+                              style: TextStyle(color: muted)),
+                          const SizedBox(height: 16),
+                          _cardPreview(
+                            bank: bank.text,
+                            name: name.text,
+                            nickname: existing?.nickname ?? '',
+                            number: cardNumber.text,
+                            expiry: expiry.text,
+                            network: network,
+                            styleSeed: styleSeed,
+                            showBack: false,
+                            cvv: cvv.text,
+                            artworkPath: artworkPath,
                           ),
-                          if (artworkPath != null)
-                            TextButton(
-                              onPressed: () => setSheet(() {
-                                artworkPath = null;
-                                pickedArtworkPath = null;
-                              }),
-                              child: const Text('Use generated style'),
+                          const SizedBox(height: 8),
+                          Wrap(spacing: 8, children: [
+                            OutlinedButton.icon(
+                              onPressed: () async {
+                                final image = await ImagePicker().pickImage(
+                                  source: ImageSource.gallery,
+                                  maxWidth: 1600,
+                                  imageQuality: 92,
+                                );
+                                if (image == null) return;
+                                setSheet(() {
+                                  artworkPath = image.path;
+                                  pickedArtworkPath = image.path;
+                                });
+                              },
+                              icon: const HugeIcon(
+                                  icon: HugeIcons.strokeRoundedImage01),
+                              label: Text(artworkPath == null
+                                  ? 'Choose card image'
+                                  : 'Change image'),
                             ),
-                        ]),
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: Text(
-                              'Card artwork is stored only on this device.',
-                              style: TextStyle(color: muted, fontSize: 12)),
-                        ),
-                        const SizedBox(height: 20),
-                        _field(bank, 'Bank or issuer'),
-                        _field(name, 'Card name and variant'),
-                        DropdownButtonFormField<String>(
-                          value: network,
-                          decoration:
-                              const InputDecoration(labelText: 'Card network'),
-                          items: const [
-                            'Visa',
-                            'Mastercard',
-                            'RuPay',
-                            'American Express',
-                            'Diners Club International',
-                            'Discover',
-                            'JCB',
-                            'Other',
-                          ]
-                              .map((value) => DropdownMenuItem<String>(
-                                    value: value,
-                                    child: Text(value),
-                                  ))
-                              .toList(),
-                          onChanged: (value) => setSheet(() {
-                            network = value ?? 'Other';
-                            networkWasChosen = true;
-                            _trimDigits(cardNumber, _panLength(network));
-                            _trimDigits(cvv, _cvvLength(network));
-                          }),
-                        ),
-                        const SizedBox(height: 12),
-                        FormField<String>(
-                          initialValue: cardNumber.text,
-                          validator: (value) {
-                            final digits =
-                                value?.replaceAll(RegExp(r'\D'), '') ?? '';
-                            if (digits.isEmpty && existing != null) {
-                              return null;
-                            }
-                            if (existing != null &&
-                                digits == existing.cardNumber) {
-                              return null;
-                            }
-                            if (!_hasValidPanLength(network, digits.length)) {
-                              return 'Enter ${_panLength(network)} digits';
-                            }
-                            return null;
-                          },
-                          builder: (fieldState) => Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              CardNumberBoxes(
-                                value: cardNumber.text,
-                                maxLength: _panLength(network),
-                                obscure: !revealNumber,
-                                onChanged: (digits) {
-                                  cardNumber.text = digits;
-                                  fieldState.didChange(digits);
-                                  if (!networkWasChosen) {
-                                    final detected = _networkFromNumber(digits);
-                                    if (detected != network) {
+                            if (artworkPath != null)
+                              TextButton(
+                                onPressed: () => setSheet(() {
+                                  artworkPath = null;
+                                  pickedArtworkPath = null;
+                                }),
+                                child: const Text('Use generated style'),
+                              ),
+                          ]),
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: Text(
+                                'Card artwork is stored only on this device.',
+                                style: TextStyle(color: muted, fontSize: 12)),
+                          ),
+                          const SizedBox(height: 20),
+                          Builder(
+                            builder: (_) {
+                              final banks = catalogCards
+                                  .map((entry) => entry.bank)
+                                  .where((bank) => bank.isNotEmpty)
+                                  .toSet()
+                                  .toList()
+                                ..sort();
+                              if (banks.isEmpty || bankChoice == manualChoice) {
+                                return _field(bank, 'Bank or issuer');
+                              }
+                              return _formRow(DropdownButtonFormField<String>(
+                                value: bankChoice,
+                                dropdownColor: surface,
+                                borderRadius: BorderRadius.circular(18),
+                                decoration: _sheetFieldDecoration('Bank or issuer'),
+                                validator: (value) => value == null
+                                    ? 'Select bank or pick manual entry'
+                                    : null,
+                                items: [
+                                  ...banks.map(
+                                    (bank) => DropdownMenuItem<String>(
+                                      value: bank,
+                                      child: Text(bank),
+                                    ),
+                                  ),
+                                  const DropdownMenuItem<String>(
+                                    value: manualChoice,
+                                    child: Text('Other / enter manually'),
+                                  ),
+                                ],
+                                onChanged: (value) => setSheet(() {
+                                  if (value == manualChoice) {
+                                    bankChoice = manualChoice;
+                                    nameChoice = manualChoice;
+                                    selectedEntry = null;
+                                    return;
+                                  }
+                                  bankChoice = value;
+                                  bank.text = value ?? '';
+                                  final names = catalogCards
+                                      .where((entry) => entry.bank == value)
+                                      .map((entry) => entry.name)
+                                      .where((n) => n.isNotEmpty)
+                                      .toSet()
+                                      .toList()
+                                    ..sort();
+                                  final seedName = name.text.trim();
+                                  if (!names.contains(seedName)) {
+                                    name.text = '';
+                                    nameChoice = null;
+                                    selectedEntry = null;
+                                  } else {
+                                    selectedEntry = catalogCards.firstWhere(
+                                      (entry) =>
+                                          entry.bank == value &&
+                                          entry.name == seedName,
+                                    );
+                                  }
+                                }),
+                              ));
+                            },
+                          ),
+                          Builder(
+                            builder: (_) {
+                              final names = catalogCards
+                                  .where((entry) => entry.bank == bankChoice)
+                                  .map((entry) => entry.name)
+                                  .where((n) => n.isNotEmpty)
+                                  .toSet()
+                                  .toList()
+                                ..sort();
+                              if (catalogCards.isEmpty ||
+                                  bankChoice == manualChoice ||
+                                  nameChoice == manualChoice) {
+                                return _field(name, 'Card name and variant');
+                              }
+                              return _formRow(DropdownButtonFormField<String>(
+                                value:
+                                    names.contains(nameChoice) ? nameChoice : null,
+                                dropdownColor: surface,
+                                borderRadius: BorderRadius.circular(18),
+                                decoration: _sheetFieldDecoration(
+                                  'Card name and variant',
+                                  hint: bankChoice == null
+                                      ? 'Pick a bank first'
+                                      : 'Select the card variant',
+                                ),
+                                validator: (value) => value == null
+                                    ? 'Select a variant or pick manual entry'
+                                    : null,
+                                items: [
+                                  ...names.map(
+                                    (name) => DropdownMenuItem<String>(
+                                      value: name,
+                                      child: Text(name),
+                                    ),
+                                  ),
+                                  const DropdownMenuItem<String>(
+                                    value: manualChoice,
+                                    child: Text('Other / enter manually'),
+                                  ),
+                                ],
+                                onChanged: bankChoice == null
+                                    ? null
+                                    : (value) => setSheet(() {
+                                  if (value == manualChoice) {
+                                    nameChoice = manualChoice;
+                                    selectedEntry = null;
+                                    return;
+                                  }
+                                  nameChoice = value;
+                                  name.text = value ?? '';
+                                  selectedEntry = catalogCards.firstWhere(
+                                    (entry) =>
+                                        entry.bank == bankChoice &&
+                                        entry.name == value,
+                                  );
+                                  if (!networkWasChosen &&
+                                      selectedEntry != null) {
+                                    final detected =
+                                        networkFromCatalog(selectedEntry);
+                                    if (detected != 'Other') {
                                       network = detected;
+                                      networkWasChosen = true;
+                                      _trimDigits(
+                                          cardNumber, _panLength(network));
                                       _trimDigits(cvv, _cvvLength(network));
                                     }
                                   }
-                                  setSheet(() {});
-                                },
-                                onToggleVisibility: () => setSheet(
-                                  () => revealNumber = !revealNumber,
-                                ),
-                              ),
-                              if (fieldState.hasError)
-                                Padding(
-                                  padding: const EdgeInsets.only(
-                                    top: 6,
-                                    left: 12,
-                                  ),
-                                  child: Text(
-                                    fieldState.errorText!,
-                                    style: TextStyle(
-                                      color: Theme.of(ctx).colorScheme.error,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        Row(children: [
-                          Expanded(
-                              child: _paymentField(
-                            expiry,
-                            'Expiry date',
-                            hint: 'MM/YY',
-                            required: existing == null ||
-                                (existing.expiryDate.isNotEmpty),
-                            formatters: [
-                              FilteringTextInputFormatter.allow(
-                                RegExp(r'[0-9/]'),
-                              ),
-                              LengthLimitingTextInputFormatter(5),
-                            ],
-                            onChanged: (value) {
-                              final digits =
-                                  value.replaceAll(RegExp(r'\D'), '');
-                              final formatted = digits.length > 2
-                                  ? '${digits.substring(0, 2)}/${digits.substring(2, digits.length.clamp(2, 4).toInt())}'
-                                  : digits;
-                              if (formatted != value) {
-                                expiry.value = TextEditingValue(
-                                    text: formatted,
-                                    selection: TextSelection.collapsed(
-                                        offset: formatted.length));
-                              }
-                              setSheet(() {});
+                                }),
+                              ));
                             },
+                          ),
+                          _formRow(DropdownButtonFormField<String>(
+                            value: network,
+                            dropdownColor: surface,
+                            borderRadius: BorderRadius.circular(18),
+                            decoration: _sheetFieldDecoration('Card network'),
+                            items: const [
+                              'Visa',
+                              'Mastercard',
+                              'RuPay',
+                              'American Express',
+                              'Diners Club International',
+                              'Discover',
+                              'JCB',
+                              'Other',
+                            ]
+                                .map((value) => DropdownMenuItem<String>(
+                                      value: value,
+                                      child: Text(value),
+                                    ))
+                                .toList(),
+                            onChanged: (value) => setSheet(() {
+                              network = value ?? 'Other';
+                              networkWasChosen = true;
+                              _trimDigits(cardNumber, _panLength(network));
+                              _trimDigits(cvv, _cvvLength(network));
+                            }),
+                          )),
+                          const SizedBox(height: 12),
+                          FormField<String>(
+                            initialValue: cardNumber.text,
                             validator: (value) {
-                              if ((value ?? '').isEmpty && existing != null)
+                              final digits =
+                                  value?.replaceAll(RegExp(r'\D'), '') ?? '';
+                              if (digits.isEmpty && existing != null) {
                                 return null;
-                              final match =
-                                  RegExp(r'^(0[1-9]|1[0-2])/([0-9]{2})$')
-                                      .firstMatch(value ?? '');
-                              if (match == null) return 'Use MM/YY';
-                              final month = int.parse(match.group(1)!);
-                              final year = 2000 + int.parse(match.group(2)!);
-                              final now = DateTime.now();
-                              if (year < now.year ||
-                                  (year == now.year && month < now.month))
-                                return 'Card has expired';
+                              }
+                              if (existing != null &&
+                                  digits == existing.cardNumber) {
+                                return null;
+                              }
+                              if (!_hasValidPanLength(network, digits.length)) {
+                                return 'Enter ${_panLength(network)} digits';
+                              }
                               return null;
                             },
-                          )),
-                          const SizedBox(width: 10),
-                          Expanded(
-                              child: _paymentField(
-                            cvv,
-                            'CVV',
-                            hint: '•••',
-                            obscure: !revealCvv,
-                            onToggle: () =>
-                                setSheet(() => revealCvv = !revealCvv),
-                            onChanged: (_) => setSheet(() {}),
-                            validator: (value) => value != null &&
-                                    value.isNotEmpty &&
-                                    value.length != _cvvLength(network)
-                                ? 'Enter ${_cvvLength(network)} digits'
-                                : null,
-                            formatters: [
-                              FilteringTextInputFormatter.digitsOnly,
-                              LengthLimitingTextInputFormatter(
-                                  _cvvLength(network)),
-                            ],
-                          )),
-                        ]),
-                        Padding(
-                          padding: EdgeInsets.only(bottom: 12),
-                          child: Text(
-                              'Card number and expiry are encrypted on this device. CVV stays in memory for this session and is never saved.',
-                              style: TextStyle(color: muted, fontSize: 12)),
-                        ),
-                        const SizedBox(height: 12),
-                        SizedBox(
-                          width: double.infinity,
-                          child: FilledButton(
-                            onPressed: () async {
-                              if (!form.currentState!.validate()) return;
-                              // Form validation marks its inherited scope dirty to
-                              // paint validation state. Let that frame finish before
-                              // any save or route teardown begins.
-                              await WidgetsBinding.instance.endOfFrame;
-                              if (!ctx.mounted) return;
-                              final digits =
-                                  cardNumber.text.replaceAll(RegExp(r'\D'), '');
-                              final card = CreditCard(
-                                databaseId: existing?.databaseId,
-                                styleSeed: styleSeed,
-                                bank: bank.text.trim(),
-                                name: name.text.trim(),
-                                network: network,
-                                nickname: existing?.nickname ?? '',
-                                annualFee: existing?.annualFee ??
-                                    catalogue?.annualFee ??
-                                    0,
-                                cashback: existing?.cashback ??
-                                    catalogue?.cashbackRate ??
-                                    0,
-                                rewardRate: existing?.rewardRate ?? 0,
-                                pointValue: existing?.pointValue ?? 0,
-                                categories: existing?.categories ??
-                                    catalogue?.category ??
-                                    '',
-                                notes: existing?.notes ?? catalogNotes,
-                                cardNumber: digits,
-                                expiryDate: expiry.text.trim(),
-                                cvv: cvv.text.trim(),
-                                secureDetails: existing?.secureDetails ?? '',
-                                active: existing?.active ?? true,
-                                rewardsStack: existing?.rewardsStack ?? false,
-                                artworkPath: artworkPath,
-                              );
-                              String? copiedArtwork;
-                              if (pickedArtworkPath != null) {
-                                final directory = Directory(p.join(
-                                    await getDatabasesPath(), 'card_art'));
-                                await directory.create(recursive: true);
-                                final extension = p
-                                    .extension(pickedArtworkPath!)
-                                    .toLowerCase();
-                                final safeExtension = const {
-                                  '.jpg',
-                                  '.jpeg',
-                                  '.png',
-                                  '.webp'
-                                }.contains(extension)
-                                    ? extension
-                                    : '.jpg';
-                                copiedArtwork = p.join(directory.path,
-                                    'art_${DateTime.now().microsecondsSinceEpoch}$safeExtension');
-                                await File(pickedArtworkPath!)
-                                    .copy(copiedArtwork);
-                                card.artworkPath = copiedArtwork;
-                              }
-                              if (index == null) {
-                                _resetWalletPage();
-                                cards.add(card);
-                              } else {
-                                cards[index] = card;
-                              }
-                              FocusManager.instance.primaryFocus?.unfocus();
-                              try {
-                                await _persistCard(card, notify: false);
-                              } catch (error) {
-                                if (copiedArtwork != null) {
-                                  try {
-                                    await File(copiedArtwork).delete();
-                                  } catch (_) {}
-                                }
-                                if (index == null) {
-                                  cards.remove(card);
-                                } else if (existing != null) {
-                                  cards[index] = existing;
-                                }
-                                if (ctx.mounted) {
-                                  ScaffoldMessenger.of(ctx).showSnackBar(
-                                    SnackBar(
-                                        content: Text(
-                                            'Could not save card: $error')),
-                                  );
-                                }
-                                return;
-                              }
-                              if (existing?.artworkPath != null &&
-                                  existing!.artworkPath != card.artworkPath) {
-                                try {
-                                  await File(existing.artworkPath!).delete();
-                                } catch (_) {}
-                              }
-                              if (!ctx.mounted) return;
-                              await WidgetsBinding.instance.endOfFrame;
-                              if (ctx.mounted) Navigator.pop(ctx);
-                            },
-                            style: FilledButton.styleFrom(
-                              backgroundColor: accentColor,
-                              foregroundColor: isCardyDarkMode
-                                  ? const Color(0xFF111111)
-                                  : Colors.white,
-                            ),
-                            child: Text(
-                              existing == null ? 'Save card' : 'Save changes',
+                            builder: (fieldState) => Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                CardNumberBoxes(
+                                  value: cardNumber.text,
+                                  maxLength: _panLength(network),
+                                  obscure: !revealNumber,
+                                  onChanged: (digits) {
+                                    cardNumber.text = digits;
+                                    fieldState.didChange(digits);
+                                    if (!networkWasChosen) {
+                                      final detected = _networkFromNumber(digits);
+                                      if (detected != network) {
+                                        network = detected;
+                                        _trimDigits(cvv, _cvvLength(network));
+                                      }
+                                    }
+                                    setSheet(() {});
+                                  },
+                                  onToggleVisibility: () => setSheet(
+                                    () => revealNumber = !revealNumber,
+                                  ),
+                                ),
+                                if (fieldState.hasError)
+                                  Padding(
+                                    padding: const EdgeInsets.only(
+                                      top: 6,
+                                      left: 12,
+                                    ),
+                                    child: Text(
+                                      fieldState.errorText!,
+                                      style: TextStyle(
+                                        color: Theme.of(ctx).colorScheme.error,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ),
+                              ],
                             ),
                           ),
-                        ),
-                      ],
+                          const SizedBox(height: 16),
+                          Row(children: [
+                            Expanded(
+                                child: _paymentField(
+                              expiry,
+                              'Expiry date',
+                              hint: 'MM/YY',
+                              required: existing == null ||
+                                  (existing.expiryDate.isNotEmpty),
+                              formatters: [
+                                FilteringTextInputFormatter.allow(
+                                  RegExp(r'[0-9/]'),
+                                ),
+                                LengthLimitingTextInputFormatter(5),
+                              ],
+                              onChanged: (value) {
+                                final digits =
+                                    value.replaceAll(RegExp(r'\D'), '');
+                                final formatted = digits.length > 2
+                                    ? '${digits.substring(0, 2)}/${digits.substring(2, digits.length.clamp(2, 4).toInt())}'
+                                    : digits;
+                                if (formatted != value) {
+                                  expiry.value = TextEditingValue(
+                                      text: formatted,
+                                      selection: TextSelection.collapsed(
+                                          offset: formatted.length));
+                                }
+                                setSheet(() {});
+                              },
+                              validator: (value) {
+                                if ((value ?? '').isEmpty && existing != null)
+                                  return null;
+                                final match =
+                                    RegExp(r'^(0[1-9]|1[0-2])/([0-9]{2})$')
+                                        .firstMatch(value ?? '');
+                                if (match == null) return 'Use MM/YY';
+                                final month = int.parse(match.group(1)!);
+                                final year = 2000 + int.parse(match.group(2)!);
+                                final now = DateTime.now();
+                                if (year < now.year ||
+                                    (year == now.year && month < now.month))
+                                  return 'Card has expired';
+                                return null;
+                              },
+                            )),
+                            const SizedBox(width: 10),
+                            Expanded(
+                                child: _paymentField(
+                              cvv,
+                              'CVV',
+                              hint: '•••',
+                              obscure: !revealCvv,
+                              onToggle: () =>
+                                  setSheet(() => revealCvv = !revealCvv),
+                              onChanged: (_) => setSheet(() {}),
+                              validator: (value) => value != null &&
+                                      value.isNotEmpty &&
+                                      value.length != _cvvLength(network)
+                                  ? 'Enter ${_cvvLength(network)} digits'
+                                  : null,
+                              formatters: [
+                                FilteringTextInputFormatter.digitsOnly,
+                                LengthLimitingTextInputFormatter(
+                                    _cvvLength(network)),
+                              ],
+                            )),
+                          ]),
+                          Padding(
+                            padding: EdgeInsets.only(bottom: 12),
+                            child: Text(
+                                'Card number and expiry are encrypted on this device. CVV stays in memory for this session and is never saved.',
+                                style: TextStyle(color: muted, fontSize: 12)),
+                          ),
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton(
+                              onPressed: () async {
+                                if (!form.currentState!.validate()) return;
+                                // Form validation marks its inherited scope dirty to
+                                // paint validation state. Let that frame finish before
+                                // any save or route teardown begins.
+                                await WidgetsBinding.instance.endOfFrame;
+                                if (!ctx.mounted) return;
+                                final digits =
+                                    cardNumber.text.replaceAll(RegExp(r'\D'), '');
+                                final entry =
+                                    selectedEntry ?? catalogue;
+                                final card = CreditCard(
+                                  databaseId: existing?.databaseId,
+                                  styleSeed: styleSeed,
+                                  bank: bank.text.trim(),
+                                  name: name.text.trim(),
+                                  network: network,
+                                  nickname: existing?.nickname ?? '',
+                                  annualFee: existing?.annualFee ??
+                                      entry?.annualFee ??
+                                      0,
+                                  cashback: existing?.cashback ??
+                                      entry?.cashbackRate ??
+                                      0,
+                                  rewardRate: existing?.rewardRate ?? 0,
+                                  pointValue: existing?.pointValue ?? 0,
+                                  categories: existing?.categories ??
+                                      entry?.category ??
+                                      '',
+                                  notes: existing?.notes ?? cardNotes(entry),
+                                  cardNumber: digits,
+                                  expiryDate: expiry.text.trim(),
+                                  cvv: cvv.text.trim(),
+                                  secureDetails: existing?.secureDetails ?? '',
+                                  active: existing?.active ?? true,
+                                  rewardsStack: existing?.rewardsStack ?? false,
+                                  artworkPath: artworkPath,
+                                );
+                                String? copiedArtwork;
+                                if (pickedArtworkPath != null) {
+                                  final directory = Directory(p.join(
+                                      await getDatabasesPath(), 'card_art'));
+                                  await directory.create(recursive: true);
+                                  final extension = p
+                                      .extension(pickedArtworkPath!)
+                                      .toLowerCase();
+                                  final safeExtension = const {
+                                    '.jpg',
+                                    '.jpeg',
+                                    '.png',
+                                    '.webp'
+                                  }.contains(extension)
+                                      ? extension
+                                      : '.jpg';
+                                  copiedArtwork = p.join(directory.path,
+                                      'art_${DateTime.now().microsecondsSinceEpoch}$safeExtension');
+                                  await File(pickedArtworkPath!)
+                                      .copy(copiedArtwork);
+                                  card.artworkPath = copiedArtwork;
+                                }
+                                if (index == null) {
+                                  _resetWalletPage();
+                                  cards.add(card);
+                                } else {
+                                  cards[index] = card;
+                                }
+                                FocusManager.instance.primaryFocus?.unfocus();
+                                try {
+                                  await _persistCard(card, notify: false);
+                                } catch (error) {
+                                  if (copiedArtwork != null) {
+                                    try {
+                                      await File(copiedArtwork).delete();
+                                    } catch (_) {}
+                                  }
+                                  if (index == null) {
+                                    cards.remove(card);
+                                  } else if (existing != null) {
+                                    cards[index] = existing;
+                                  }
+                                  if (ctx.mounted) {
+                                    ScaffoldMessenger.of(ctx).showSnackBar(
+                                      SnackBar(
+                                          content: Text(
+                                              'Could not save card: $error')),
+                                    );
+                                  }
+                                  return;
+                                }
+                                if (existing?.artworkPath != null &&
+                                    existing!.artworkPath != card.artworkPath) {
+                                  try {
+                                    await File(existing.artworkPath!).delete();
+                                  } catch (_) {}
+                                }
+                                if (!ctx.mounted) return;
+                                await WidgetsBinding.instance.endOfFrame;
+                                if (ctx.mounted) Navigator.pop(ctx);
+                              },
+                              style: FilledButton.styleFrom(
+                                backgroundColor: accentColor,
+                                foregroundColor: isCardyDarkMode
+                                    ? const Color(0xFF111111)
+                                    : Colors.white,
+                              ),
+                              child: Text(
+                                existing == null ? 'Save card' : 'Save changes',
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-              ),
+              );
+            },
             ),
           ),
         );
@@ -1927,52 +2022,82 @@ class _CardyHomeState extends State<CardyHome> {
     }
 
     final visualStyle = _cardVisualStyle(styleSeed);
+    final hasArtwork = artworkPath != null && File(artworkPath).existsSync();
+    final displayName = (nickname.isNotEmpty ? nickname : name).isEmpty
+        ? 'YOUR NAME'
+        : (nickname.isNotEmpty ? nickname : name);
     return Center(
       child: FittedBox(
         fit: BoxFit.scaleDown,
-        child: _tiltedCard(
-          child: artworkPath != null && File(artworkPath).existsSync()
-              ? _artworkCardFace(
-                  width: previewWidth,
-                  bank: bank,
-                  variant: name,
-                  name: (nickname.isNotEmpty ? nickname : name).isEmpty
-                      ? 'YOUR NAME'
-                      : (nickname.isNotEmpty ? nickname : name),
-                  number: displayDigits,
-                  expiry: expiry,
-                  network: network,
-                  path: artworkPath,
-                )
-              : HorizontalCard(
-                  width: previewWidth,
-                  cardNumber: displayDigits,
-                  cardHolder: (nickname.isNotEmpty ? nickname : name).isEmpty
-                      ? 'YOUR NAME'
-                      : (nickname.isNotEmpty ? nickname : name),
-                  expiryDate: expiry.isEmpty ? 'MM/YY' : expiry,
-                  cvv: '',
-                  brand: _horizontalBrand(network),
-                  cardTheme: visualStyle.theme,
-                  isHolographic: visualStyle.isHolographic,
-                  holoConfig: visualStyle.holoConfig,
-                  thickness: 2,
-                  isMasked: true,
-                  enableCopy: false,
-                  isDynamicCvv: false,
-                  enableTilt: false,
-                  onTap: () {},
-                  bankLogo: Text(
-                    bank.isEmpty ? 'CARD' : bank.toUpperCase(),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: visualStyle.theme.textColor,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _tiltedCard(
+              child: hasArtwork
+                  ? _artworkCardFace(
+                      width: previewWidth,
+                      bank: bank,
+                      variant: name,
+                      name: displayName,
+                      number: displayDigits,
+                      expiry: expiry,
+                      network: network,
+                      path: artworkPath,
+                    )
+                  : HorizontalCard(
+                      width: previewWidth,
+                      cardNumber: displayDigits,
+                      cardHolder: displayName,
+                      expiryDate: expiry.isEmpty ? 'MM/YY' : expiry,
+                      cvv: '',
+                      brand: _horizontalBrand(network),
+                      cardTheme: visualStyle.theme,
+                      isHolographic: visualStyle.isHolographic,
+                      holoConfig: visualStyle.holoConfig,
+                      thickness: 2,
+                      isMasked: true,
+                      enableCopy: false,
+                      isDynamicCvv: false,
+                      enableTilt: false,
+                      onTap: () {},
+                      bankLogo: Text(
+                        bank.isEmpty ? 'CARD' : bank.toUpperCase(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: visualStyle.theme.textColor,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
                     ),
-                  ),
+            ),
+            if (hasArtwork) ...[
+              const SizedBox(height: 12),
+              SizedBox(
+                width: previewWidth,
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${bank.isEmpty ? 'CARD' : bank.toUpperCase()}  ·  ${name.toUpperCase()}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: ink,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: .8,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    _networkWordmark(network, const TextStyle(color: Colors.white)),
+                  ],
                 ),
+              ),
+            ],
+          ],
         ),
       ),
     );
@@ -1998,6 +2123,34 @@ class _CardyHomeState extends State<CardyHome> {
         ),
       );
 
+  InputDecoration _sheetFieldDecoration(String label, {String? hint}) =>
+      InputDecoration(
+        labelText: label,
+        hintText: hint,
+        labelStyle: TextStyle(color: muted, fontWeight: FontWeight.w500),
+        floatingLabelStyle:
+            TextStyle(color: ink, fontWeight: FontWeight.w600),
+        filled: true,
+        fillColor: softSurface,
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(18),
+          borderSide: BorderSide.none,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(18),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(18),
+          borderSide: BorderSide(color: brandAccent, width: 1.4),
+        ),
+      );
+
+  Widget _formRow(Widget child) =>
+      Padding(padding: const EdgeInsets.only(bottom: 14), child: child);
+
   Widget _field(
     TextEditingController c,
     String label, {
@@ -2005,19 +2158,16 @@ class _CardyHomeState extends State<CardyHome> {
     bool numeric = false,
     int maxLines = 1,
   }) =>
-      Padding(
-        padding: const EdgeInsets.only(bottom: 11),
-        child: TextFormField(
-          controller: c,
-          maxLines: maxLines,
-          keyboardType: numeric
-              ? const TextInputType.numberWithOptions(decimal: true)
-              : TextInputType.text,
-          validator: (v) =>
-              required && (v == null || v.trim().isEmpty) ? 'Required' : null,
-          decoration: InputDecoration(labelText: label),
-        ),
-      );
+      _formRow(TextFormField(
+        controller: c,
+        maxLines: maxLines,
+        keyboardType: numeric
+            ? const TextInputType.numberWithOptions(decimal: true)
+            : TextInputType.text,
+        validator: (v) =>
+            required && (v == null || v.trim().isEmpty) ? 'Required' : null,
+        decoration: _sheetFieldDecoration(label),
+      ));
   void _cardDetails(CreditCard c, int i) {
     var revealNumber = false;
     var revealCvv = false;

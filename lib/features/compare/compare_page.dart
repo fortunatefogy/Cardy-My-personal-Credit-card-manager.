@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 
+import '../cards/card_catalogue.dart';
+import '../cards/card_catalogue_service.dart';
 import '../cards/credit_card.dart';
+import '../assistant/gemini_chat_service.dart';
 import '../../theme/cardy_palette.dart';
 
 class ComparePage extends StatefulWidget {
@@ -14,11 +17,37 @@ class ComparePage extends StatefulWidget {
 class _ComparePageState extends State<ComparePage> {
   final amount = TextEditingController();
   String? selectedCategory;
+  List<CardCatalogEntry> _catalogue = const [];
   List<_Result> results = [];
   bool calculated = false;
 
+  @override
+  void initState() {
+    super.initState();
+    _loadCatalogue();
+  }
+
+  Future<void> _loadCatalogue() async {
+    try {
+      final entries = await CardCatalogueService.instance.list();
+      if (mounted) setState(() => _catalogue = entries);
+    } catch (_) {
+      if (mounted) setState(() => _catalogue = const []);
+    }
+  }
+
+  List<String> _categoriesOf(CreditCard card) {
+    if (card.categories.trim().isNotEmpty) {
+      return card.categories.split(RegExp(r'[,;/|]')).toList();
+    }
+    final entry = GeminiChatService.matchCatalogueEntry(card, _catalogue);
+    return entry == null || entry.category.isEmpty
+        ? const []
+        : [entry.category];
+  }
+
   List<String> get categories => widget.cards
-      .expand((card) => card.categories.split(RegExp(r'[,;/|]')))
+      .expand(_categoriesOf)
       .map((category) => category.trim())
       .where((category) => category.isNotEmpty)
       .toSet()
@@ -27,40 +56,93 @@ class _ComparePageState extends State<ComparePage> {
 
   void _calculate() {
     final spend = double.tryParse(amount.text.replaceAll(',', '')) ?? 0;
-    final active = widget.cards.where((card) {
-      if (!card.active) return false;
-      if (selectedCategory == null) return true;
-      return card.categories.split(RegExp(r'[,;/|]')).any((value) =>
-          value.trim().toLowerCase() == selectedCategory!.toLowerCase());
-    }).toList();
-    if (spend <= 0 || active.isEmpty) {
+    if (spend <= 0) {
       results = [];
       setState(() => calculated = true);
       return;
     }
-    results = active.map((c) {
-      final cashback = spend * c.cashback / 100;
-      final points = spend / 100 * c.rewardRate * c.pointValue;
-      final estimated = c.rewardsStack
-          ? cashback + points
-          : (cashback > points ? cashback : points);
-      return _Result(c, estimated, cashback, points, spend - estimated);
-    }).toList()
-      ..sort((a, b) => b.savings.compareTo(a.savings));
+    results = widget.cards
+        .where((card) => card.active)
+        .where((card) =>
+            selectedCategory == null ||
+            _categoriesOf(card).any((value) =>
+                value.trim().toLowerCase() ==
+                selectedCategory!.toLowerCase()))
+        .map((card) => _evaluate(card, spend))
+        .toList()
+      ..sort((a, b) {
+        if (a.known != b.known) return a.known ? -1 : 1;
+        return b.savings.compareTo(a.savings);
+      });
     setState(() => calculated = true);
+  }
+
+  _Result _evaluate(CreditCard card, double spend) {
+    final entry = GeminiChatService.matchCatalogueEntry(card, _catalogue);
+    final cashbackPct = card.cashback > 0
+        ? card.cashback
+        : (entry?.cashbackRate ?? 0);
+    final userPointsPct = card.rewardRate > 0 && card.pointValue > 0
+        ? card.rewardRate / 100 * card.pointValue
+        : 0.0;
+    final catalogRate = _pointsRatePercent(entry);
+    final pointsPct =
+        userPointsPct > 0 ? userPointsPct : (catalogRate ?? 0.0);
+    final known = cashbackPct > 0 || pointsPct > 0;
+    final paired =
+        card.rewardsStack && cashbackPct > 0 && pointsPct > 0;
+    final effectivePct = paired
+        ? cashbackPct + pointsPct
+        : (cashbackPct > pointsPct ? cashbackPct : pointsPct);
+    final savings = known ? spend * effectivePct / 100 : 0.0;
+    final cashback = spend * cashbackPct / 100;
+    final points = spend * pointsPct / 100;
+    return _Result(
+      card: card,
+      entry: entry,
+      catalogRate: catalogRate,
+      savings: savings,
+      cashback: cashback,
+      points: points,
+      cost: spend - savings,
+      known: known,
+      paired: paired,
+    );
+  }
+
+  double? _pointsRatePercent(CardCatalogEntry? entry) {
+    if (entry == null) return null;
+    final currency =
+        (entry.details['Reward Currency'] ?? '').toLowerCase();
+    final isCashback = entry.category.toLowerCase() == 'cashback' ||
+        currency.contains('cashback');
+    if (isCashback) return null;
+    final match = RegExp(r'(\d+(?:\.\d+)?)\s*%')
+        .firstMatch(entry.details['Base Reward Rate'] ?? '');
+    return match == null ? null : double.tryParse(match.group(1)!);
+  }
+
+  String? _checkedLabel(CardCatalogEntry entry) {
+    final checked = entry.detailsCheckedAt ?? entry.checkedAt;
+    if (checked == null) return null;
+    final d = checked.day.toString().padLeft(2, '0');
+    final m = checked.month.toString().padLeft(2, '0');
+    return '$d/$m/${checked.year}';
   }
 
   @override
   Widget build(BuildContext context) => ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          Text(
+          const Text(
             'Best card finder',
             style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 6),
           Text(
-            'Estimate rewards from the rates you entered.',
+            _catalogue.isEmpty
+                ? 'Estimate rewards from the rates you entered. Loading CardTrail catalogue…'
+                : 'Estimates use your entered rates, filled in from the CardTrail catalogue where data is missing.',
             style: TextStyle(color: muted),
           ),
           const SizedBox(height: 18),
@@ -110,20 +192,7 @@ class _ComparePageState extends State<ComparePage> {
           if (calculated) ...[
             const SizedBox(height: 20),
             if (results.isEmpty)
-              Text(
-                widget.cards.where((card) => card.active).isEmpty
-                    ? 'Add an active card to compare.'
-                    : selectedCategory != null &&
-                            !widget.cards.any((card) =>
-                                card.active &&
-                                card.categories.split(RegExp(r'[,;/|]')).any(
-                                    (value) =>
-                                        value.trim().toLowerCase() ==
-                                        selectedCategory!.toLowerCase()))
-                        ? 'No active cards have the $selectedCategory category.'
-                        : 'Enter a valid purchase amount to compare.',
-                style: TextStyle(color: muted),
-              )
+              Text(_emptyMessage(), style: TextStyle(color: muted))
             else ...[
               Container(
                 padding: const EdgeInsets.all(14),
@@ -132,7 +201,9 @@ class _ComparePageState extends State<ComparePage> {
                   borderRadius: BorderRadius.circular(14),
                 ),
                 child: Text(
-                  'Estimate based only on the rates you entered. Unconfirmed cashback and points are not added together. Caps, eligibility, exclusions and fees are not applied.',
+                  _catalogue.isEmpty
+                      ? 'Catalogue data unavailable — comparing only on the rates you entered. Caps, eligibility, exclusions and fees are not applied.'
+                      : 'Missing rates are filled from the CardTrail catalogue. Caps, eligibility, exclusions and fees are not applied.',
                   style: TextStyle(color: muted),
                 ),
               ),
@@ -140,70 +211,119 @@ class _ComparePageState extends State<ComparePage> {
               ...results.asMap().entries.map(
                     (e) => Padding(
                       padding: const EdgeInsets.only(bottom: 10),
-                      child: Container(
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: surface,
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: panelBorder),
-                          boxShadow: [
-                            BoxShadow(
-                              color: panelShadow,
-                              blurRadius: 16,
-                              offset: const Offset(0, 5),
-                            ),
-                          ],
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                if (e.key == 0)
-                                  HugeIcon(
-                                    icon: HugeIcons.strokeRoundedTrophy,
-                                    color: accentColor,
-                                    size: 19,
-                                  ),
-                                if (e.key == 0) const SizedBox(width: 6),
-                                Expanded(
-                                  child: Text(
-                                    e.value.card.nickname.isEmpty
-                                        ? e.value.card.name
-                                        : e.value.card.nickname,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w700,
-                                      fontSize: 16,
-                                    ),
-                                  ),
-                                ),
-                                Text(
-                                  '₹${e.value.savings.toStringAsFixed(0)} estimated rewards',
-                                  style: const TextStyle(
-                                    color: Color(0xFF7DE0A1),
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Cashback rule ₹${e.value.cashback.toStringAsFixed(0)} · Points rule ₹${e.value.points.toStringAsFixed(0)} · Net purchase cost after estimated rewards ₹${e.value.cost.toStringAsFixed(0)}',
-                              style: TextStyle(color: muted, fontSize: 12),
-                            ),
-                          ],
-                        ),
-                      ),
+                      child: _buildResultCard(e.key, e.value),
                     ),
                   ),
             ],
           ],
         ],
       );
+
+  String _emptyMessage() {
+    if (!widget.cards.any((card) => card.active)) {
+      return 'Add an active card to compare.';
+    }
+    if (selectedCategory != null &&
+        !widget.cards.any((card) =>
+            card.active &&
+            _categoriesOf(card).any((value) =>
+                value.trim().toLowerCase() ==
+                selectedCategory!.toLowerCase()))) {
+      return 'No active cards have the $selectedCategory category.';
+    }
+    return 'Enter a valid purchase amount to compare.';
+  }
+
+  Widget _buildResultCard(int rank, _Result r) {
+    final title = r.card.nickname.isEmpty ? r.card.name : r.card.nickname;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: panelBorder),
+        boxShadow: [
+          BoxShadow(
+            color: panelShadow,
+            blurRadius: 16,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              if (rank == 0 && r.known)
+                HugeIcon(
+                  icon: HugeIcons.strokeRoundedTrophy,
+                  color: accentColor,
+                  size: 19,
+                ),
+              if (rank == 0 && r.known) const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 16,
+                  ),
+                ),
+              ),
+              Text(
+                r.known
+                    ? '₹${r.savings.toStringAsFixed(0)} estimated rewards'
+                    : 'No reward data',
+                style: TextStyle(
+                  color: r.known ? const Color(0xFF7DE0A1) : muted,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (r.known)
+            Text(
+              r.paired
+                  ? 'Cashback ₹${r.cashback.toStringAsFixed(0)} + Points ₹${r.points.toStringAsFixed(0)} · Net purchase cost after estimated rewards ₹${r.cost.toStringAsFixed(0)}'
+                  : 'Cashback rule ₹${r.cashback.toStringAsFixed(0)} · Points rule ₹${r.points.toStringAsFixed(0)} · Net purchase cost after estimated rewards ₹${r.cost.toStringAsFixed(0)}',
+              style: TextStyle(color: muted, fontSize: 12),
+            )
+          else
+            Text(
+              'No reward rate found on the card or in the CardTrail catalogue. Enter the card\'s rates to compare it accurately.',
+              style: TextStyle(color: muted, fontSize: 12),
+            ),
+          if (r.catalogRate != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Base reward rate ${r.entry!.details['Base Reward Rate']} from CardTrail'
+              '${(() { final label = _checkedLabel(r.entry!); return label == null ? '' : ' (checked $label)'; })()}',
+              style: TextStyle(color: muted, fontSize: 11),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 class _Result {
-  _Result(this.card, this.savings, this.cashback, this.points, this.cost);
+  _Result({
+    required this.card,
+    required this.entry,
+    required this.catalogRate,
+    required this.savings,
+    required this.cashback,
+    required this.points,
+    required this.cost,
+    required this.known,
+    required this.paired,
+  });
   final CreditCard card;
+  final CardCatalogEntry? entry;
+  final double? catalogRate;
   final double savings, cashback, points, cost;
+  final bool known, paired;
 }

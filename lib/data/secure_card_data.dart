@@ -19,9 +19,10 @@ class SecureCardData {
   static Future<String> encrypt({
     required String number,
     required String expiry,
+    required String cvv,
   }) async =>
       (await _channel.invokeMethod<String>('encrypt', {
-        'plaintext': jsonEncode({'number': number, 'expiry': expiry}),
+        'plaintext': jsonEncode({'number': number, 'expiry': expiry, 'cvv': cvv}),
       }))!;
 
   static Future<Map<String, String>> decrypt(String payload) async {
@@ -29,13 +30,10 @@ class SecureCardData {
       'payload': payload,
     });
     final decoded = jsonDecode(plaintext!) as Map<String, dynamic>;
-    final details = <String, String>{
+    return {
       'number': decoded['number'] as String? ?? '',
       'expiry': decoded['expiry'] as String? ?? '',
+      'cvv': decoded['cvv'] as String? ?? '',
     };
-    if (decoded.containsKey('cvv')) {
-      details['cvv'] = decoded['cvv'] as String? ?? '';
-    }
-    return details;
   }
 }
