@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:io';
+import 'dart:typed_data';
+import 'package:silky_scroll/silky_scroll.dart';
 import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:flutter/services.dart';
@@ -22,8 +24,10 @@ import 'features/cards/card_catalogue.dart';
 import 'features/cards/card_catalogue_page.dart';
 import 'features/cards/card_catalogue_service.dart';
 import 'features/cards/card_wallet_stack.dart';
+import 'features/debit/debit_card.dart';
+import 'features/identity/identity_document.dart';
+import 'widgets/app_dropdown.dart';
 import 'features/assistant/ai_chat_page.dart';
-import 'features/compare/compare_page.dart';
 import 'features/security/app_lock.dart';
 import 'features/cards/card_search_delegate.dart';
 import 'theme/cardy_palette.dart';
@@ -177,6 +181,8 @@ class _CardyHomeState extends State<CardyHome> {
     try {
       final preferences = await SharedPreferences.getInstance();
       cardyDarkMode.value = preferences.getBool('dark_mode') ?? false;
+      biometricLockEnabled.value =
+          preferences.getBool('biometric_lock') ?? true;
       final database = await LocalDatabase.instance.database;
       var saved = (await database.query('cards', orderBy: 'id'))
           .map(CreditCard.fromDatabase)
@@ -227,9 +233,38 @@ class _CardyHomeState extends State<CardyHome> {
           );
         }
       }
+      final loadedDebit =
+          (await database.query('debit_cards', orderBy: 'created_at'))
+              .map(DebitCard.fromRow)
+              .toList();
+      for (final card in loadedDebit) {
+        try {
+          final details = await SecureCardData.decrypt(card.secureDetails);
+          card.cardNumber = details['number']!;
+          card.expiryDate = details['expiry']!;
+          card.cvv = details['cvv']!;
+        } catch (_) {
+          // Keep the card listed even if its encrypted details cannot be read.
+        }
+      }
+      final loadedIdentity =
+          (await database.query('identity_documents', orderBy: 'created_at'))
+              .map(IdentityDocument.fromRow)
+              .toList();
+      for (final document in loadedIdentity) {
+        if (document.secureDetails.isEmpty) continue;
+        try {
+          document.idNumber =
+              await SecureCardData.decryptText(document.secureDetails);
+        } catch (_) {
+          // Keep the document entry available if its encrypted number is unreadable.
+        }
+      }
       if (!mounted) return;
       setState(() {
         cards = saved;
+        debitCards = loadedDebit;
+        identityDocs = loadedIdentity;
         loaded = true;
       });
     } catch (error) {
@@ -305,7 +340,13 @@ class _CardyHomeState extends State<CardyHome> {
 
   @override
   Widget build(BuildContext context) {
-    final titles = ['', 'My Cards', 'Compare', 'AI Assistant'];
+    final titles = [
+      '',
+      'Credit Cards',
+      'Debit Cards',
+      'Identity',
+      'AI Assistant',
+    ];
     return Scaffold(
       appBar: tab == 0
           ? null
@@ -315,26 +356,41 @@ class _CardyHomeState extends State<CardyHome> {
                 style: const TextStyle(fontWeight: FontWeight.w700),
               ),
               actions: [
-                IconButton(
-                  onPressed: () => _search(),
-                  icon: const HugeIcon(icon: HugeIcons.strokeRoundedSearch01),
-                ),
+                if (tab != 2 && tab != 3)
+                  IconButton(
+                    onPressed: () => _search(),
+                    icon: const HugeIcon(icon: HugeIcons.strokeRoundedSearch01),
+                  ),
               ],
             ),
       body: !loaded
           ? Center(child: CircularProgressIndicator(color: accentColor))
           : IndexedStack(
               index: tab,
-              children: [_dashboard(), _myCards(), _compare(), _assistant()],
+              children: [
+                _dashboard(),
+                _myCards(),
+                _debitTab(),
+                _identityTab(),
+                _assistant(),
+              ],
             ),
-      floatingActionButton: tab == 1
+      floatingActionButton: tab == 1 || tab == 2 || tab == 3
           ? FloatingActionButton.extended(
-              onPressed: _chooseAddCard,
+              onPressed: tab == 1
+                  ? _chooseAddCard
+                  : tab == 2
+                      ? () => _editDebitCard()
+                      : () => _editIdentity(),
               backgroundColor: accentColor,
               foregroundColor:
                   isCardyDarkMode ? const Color(0xFF111111) : Colors.white,
               icon: const HugeIcon(icon: HugeIcons.strokeRoundedAdd01),
-              label: const Text('Add card'),
+              label: Text(tab == 1
+                  ? 'Add card'
+                  : tab == 2
+                      ? 'Add debit card'
+                      : 'Add document'),
             )
           : null,
       bottomNavigationBar: SafeArea(
@@ -366,12 +422,15 @@ class _CardyHomeState extends State<CardyHome> {
                 ),
                 SalomonBottomBarItem(
                   icon: const HugeIcon(icon: HugeIcons.strokeRoundedCreditCard),
-                  title: const Text('My Cards'),
+                  title: const Text('Credit Cards'),
                 ),
                 SalomonBottomBarItem(
-                  icon: const HugeIcon(
-                      icon: HugeIcons.strokeRoundedChartIncrease),
-                  title: const Text('Compare'),
+                  icon: const HugeIcon(icon: HugeIcons.strokeRoundedWallet01),
+                  title: const Text('Debit Cards'),
+                ),
+                SalomonBottomBarItem(
+                  icon: const HugeIcon(icon: HugeIcons.strokeRoundedIdCard),
+                  title: const Text('Identity'),
                 ),
                 SalomonBottomBarItem(
                   icon: const HugeIcon(icon: HugeIcons.strokeRoundedSparkles),
@@ -390,6 +449,10 @@ class _CardyHomeState extends State<CardyHome> {
         cards.asMap().entries.where((entry) => entry.value.active).toList();
     final favoriteCards =
         activeCards.where((entry) => entry.value.favorite).toList();
+    final stackCards = (favoriteCards.isEmpty ? activeCards : favoriteCards)
+        .take(5)
+        .map((entry) => entry.value)
+        .toList();
     final hour = DateTime.now().hour;
     final greeting = hour < 12
         ? 'Good morning,'
@@ -397,286 +460,997 @@ class _CardyHomeState extends State<CardyHome> {
             ? 'Good afternoon,'
             : 'Good evening,';
     return SafeArea(
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(greeting, style: TextStyle(color: muted)),
-                    const SizedBox(height: 2),
-                    Text('Cardy',
-                        style: TextStyle(
-                            color: brandAccentDeep,
-                            fontSize: 22,
-                            fontWeight: FontWeight.w800)),
-                  ],
-                ),
-              ),
-              IconButton(
-                tooltip: 'Search cards',
-                onPressed: _search,
-                icon: const HugeIcon(icon: HugeIcons.strokeRoundedSearch01),
-              ),
-              IconButton(
-                tooltip: 'Scan a card',
-                onPressed: _scanCard,
-                icon: const HugeIcon(icon: HugeIcons.strokeRoundedScan),
-              ),
-              IconButton(
-                tooltip: 'Settings',
-                onPressed: _openSettings,
-                icon: const HugeIcon(icon: HugeIcons.strokeRoundedSettings01),
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          Container(
-            height: 142,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(24),
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: isCardyDarkMode
-                    ? const [Color(0xFF393A3F), Color(0xFF1D1E21)]
-                    : const [Color(0xFF3B3B40), Color(0xFF171719)],
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: brandAccent.withValues(alpha: .26),
-                  blurRadius: 22,
-                  offset: const Offset(0, 10),
-                ),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(24),
-              child: Stack(children: [
-                Positioned(
-                  right: -20,
-                  top: -46,
-                  child: Container(
-                    width: 150,
-                    height: 150,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                          color: Colors.white.withValues(alpha: .13),
-                          width: 24),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  right: 54,
-                  bottom: -49,
-                  child: Container(
-                    width: 96,
-                    height: 96,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Colors.white.withValues(alpha: .08),
-                    ),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(19, 17, 19, 16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+      child: SilkyScroll(
+          physics: const BouncingScrollPhysics(),
+          edgeLockingDelay: Duration.zero,
+          overScrollingLockingDelay: Duration.zero,
+          builder: (_, scrollController, scrollPhysics) => ListView(
+                controller: scrollController,
+                physics: scrollPhysics,
+                padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+                children: [
+                  Row(
                     children: [
-                      Text('YOUR WALLET',
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: .78),
-                            fontSize: 10,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 1.3,
-                          )),
-                      const Spacer(),
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text('${activeCards.length}',
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 40,
-                                  height: 1,
-                                  fontWeight: FontWeight.w700)),
-                          const SizedBox(width: 9),
-                          const Padding(
-                            padding: EdgeInsets.only(bottom: 4),
-                            child: Text('active cards',
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(greeting, style: TextStyle(color: muted)),
+                            const SizedBox(height: 2),
+                            Text('Cardy',
                                 style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600)),
+                                    color: brandAccentDeep,
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w800)),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Search cards',
+                        onPressed: _search,
+                        icon: const HugeIcon(
+                            icon: HugeIcons.strokeRoundedSearch01),
+                      ),
+                      IconButton(
+                        tooltip: 'Scan a card',
+                        onPressed: _scanCard,
+                        icon: const HugeIcon(icon: HugeIcons.strokeRoundedScan),
+                      ),
+                      IconButton(
+                        tooltip: 'Settings',
+                        onPressed: _openSettings,
+                        icon: const HugeIcon(
+                            icon: HugeIcons.strokeRoundedSettings01),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                  Container(
+                    height: 142,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(24),
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: isCardyDarkMode
+                            ? const [Color(0xFF393A3F), Color(0xFF1D1E21)]
+                            : const [Color(0xFF3B3B40), Color(0xFF171719)],
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: brandAccent.withValues(alpha: .26),
+                          blurRadius: 22,
+                          offset: const Offset(0, 10),
+                        ),
+                      ],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(24),
+                      child: Stack(children: [
+                        Positioned(
+                          right: -20,
+                          top: -46,
+                          child: Container(
+                            width: 150,
+                            height: 150,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                  color: Colors.white.withValues(alpha: .13),
+                                  width: 24),
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          right: 54,
+                          bottom: -49,
+                          child: Container(
+                            width: 96,
+                            height: 96,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Colors.white.withValues(alpha: .08),
+                            ),
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(19, 17, 19, 16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('YOUR WALLET',
+                                  style: TextStyle(
+                                    color: Colors.white.withValues(alpha: .78),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    letterSpacing: 1.3,
+                                  )),
+                              const Spacer(),
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  Text('${activeCards.length}',
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 40,
+                                          height: 1,
+                                          fontWeight: FontWeight.w700)),
+                                  const SizedBox(width: 9),
+                                  const Padding(
+                                    padding: EdgeInsets.only(bottom: 4),
+                                    child: Text('active cards',
+                                        style: TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w600)),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              Text('${cards.length} cards saved in your wallet',
+                                  style: TextStyle(
+                                      color:
+                                          Colors.white.withValues(alpha: .78),
+                                      fontSize: 12)),
+                            ],
+                          ),
+                        ),
+                      ]),
+                    ),
+                  ),
+                  const SizedBox(height: 17),
+                  Row(
+                    children: [
+                      Expanded(
+                          child: _quickAction(HugeIcons.strokeRoundedAdd01,
+                              'Add card', _editCard,
+                              filled: true)),
+                      const SizedBox(width: 9),
+                      Expanded(
+                          child: _quickAction(HugeIcons.strokeRoundedGlobe,
+                              'Browse', _browseCatalogue)),
+                    ],
+                  ),
+                  if (_cardsExpiringSoon().isNotEmpty) ...[
+                    const SizedBox(height: 14),
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: isCardyDarkMode
+                            ? const Color(0xFF3B3021)
+                            : const Color(0xFFFFF2D9),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Row(
+                        children: [
+                          HugeIcon(
+                            icon: HugeIcons.strokeRoundedCalendarOff,
+                            color: isCardyDarkMode
+                                ? const Color(0xFFFFC66D)
+                                : const Color(0xFF8A5A00),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              '${_cardsExpiringSoon().map((card) => card.nickname.isEmpty ? card.name : card.nickname).join(', ')} expiring within 3 months',
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w600),
+                            ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 6),
-                      Text('${cards.length} cards saved in your wallet',
-                          style: TextStyle(
-                              color: Colors.white.withValues(alpha: .78),
-                              fontSize: 12)),
-                    ],
-                  ),
-                ),
-              ]),
-            ),
-          ),
-          const SizedBox(height: 17),
-          Row(
-            children: [
-              Expanded(
-                  child: _quickAction(
-                      HugeIcons.strokeRoundedAdd01, 'Add card', _editCard,
-                      filled: true)),
-              const SizedBox(width: 9),
-              Expanded(
-                  child: _quickAction(HugeIcons.strokeRoundedGlobe, 'Browse',
-                      _browseCatalogue)),
-              const SizedBox(width: 9),
-              Expanded(
-                  child: _quickAction(HugeIcons.strokeRoundedChartIncrease,
-                      'Compare', () => setState(() => tab = 2))),
-            ],
-          ),
-          if (_cardsExpiringSoon().isNotEmpty) ...[
-            const SizedBox(height: 14),
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: isCardyDarkMode
-                    ? const Color(0xFF3B3021)
-                    : const Color(0xFFFFF2D9),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Row(
-                children: [
-                  HugeIcon(
-                    icon: HugeIcons.strokeRoundedCalendarOff,
-                    color: isCardyDarkMode
-                        ? const Color(0xFFFFC66D)
-                        : const Color(0xFF8A5A00),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      '${_cardsExpiringSoon().map((card) => card.nickname.isEmpty ? card.name : card.nickname).join(', ')} expiring within 3 months',
-                      style: const TextStyle(fontWeight: FontWeight.w600),
                     ),
-                  ),
+                  ],
+                  const SizedBox(height: 27),
+                  _sectionTitle(
+                      favoriteCards.isEmpty ? 'Your Cards' : 'Favorites',
+                      action: 'See all',
+                      onTap: () => setState(() => tab = 1)),
+                  const SizedBox(height: 12),
+                  if (activeCards.isEmpty)
+                    _empty(
+                      'Add your first card',
+                      'Keep your card benefits together and compare rewards.',
+                      HugeIcons.strokeRoundedWallet01,
+                      button: 'Add a card',
+                      onTap: _editCard,
+                    )
+                  else
+                    _homeCardStack(
+                      count: stackCards.length,
+                      cardBuilder: (i, width) => _cardTile(
+                        stackCards[i],
+                        width: width,
+                        styleSeed: stackCards[i].styleSeed,
+                        showCaption: false,
+                        onTap: () => _cardDetails(
+                            stackCards[i], cards.indexOf(stackCards[i])),
+                      ),
+                      caption: 'SAVED CARDS',
+                      total: cards.length,
+                      onOpen: () => setState(() => tab = 1),
+                      backColor: isCardyDarkMode
+                          ? const Color(0xFF1A1B1E)
+                          : const Color(0xFF3A3A40),
+                      pocketColor: bottomBarBackground,
+                    ),
                 ],
-              ),
-            ),
-          ],
-          const SizedBox(height: 27),
-          _sectionTitle(favoriteCards.isEmpty ? 'Your Cards' : 'Favorites',
-              action: 'See all', onTap: () => setState(() => tab = 1)),
-          const SizedBox(height: 12),
-          if (activeCards.isEmpty)
-            _empty(
-              'Add your first card',
-              'Keep your card benefits together and compare rewards.',
-              HugeIcons.strokeRoundedWallet01,
-              button: 'Add a card',
-              onTap: _editCard,
-            )
-          else
-            _homeCardStack(
-              (favoriteCards.isEmpty ? activeCards : favoriteCards)
-                  .take(5)
-                  .map((entry) => entry.value)
-                  .toList(),
-            ),
-        ],
-      ),
+              )),
     );
   }
 
-  Widget _homeCardStack(List<CreditCard> stack) => LayoutBuilder(
-        builder: (context, constraints) {
-          const peek = 48.0;
-          const inset = 14.0;
-          const pocketHeight = 118.0;
-          final width = constraints.maxWidth;
-          final cardWidth = width - inset * 2;
-          final hump = width * .075;
-          final pocketTop =
-              inset + peek * (stack.length - 1) + cardWidth * .63 * .5;
-          return Container(
-            width: width,
-            height: pocketTop + pocketHeight,
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(
-              color: isCardyDarkMode
-                  ? const Color(0xFF1A1B1E)
-                  : const Color(0xFF3A3A40),
-              borderRadius: BorderRadius.circular(28),
-            ),
-            child: Stack(
-              children: [
-                for (var i = 0; i < stack.length; i++)
+  Widget _homeCardStack({
+    required int count,
+    required Widget Function(int index, double width) cardBuilder,
+    required String caption,
+    required int total,
+    required VoidCallback onOpen,
+    required Color backColor,
+    required Color pocketColor,
+  }) =>
+      RepaintBoundary(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            const peek = 48.0;
+            const inset = 14.0;
+            const taper = 12.0;
+            const pocketHeight = 118.0;
+            final width = constraints.maxWidth;
+            final cardWidth = width - inset * 2;
+            final hump = width * .075;
+            final bottomCardTop = inset + peek * (count - 1);
+            final pocketTop = inset + peek * (count - 1) + cardWidth * .63 * .5;
+            return SizedBox(
+              width: width,
+              height: pocketTop + pocketHeight,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
                   Positioned(
-                    top: inset + i * peek,
-                    left: inset,
-                    width: cardWidth,
-                    child: _cardTile(
-                      stack[i],
-                      width: cardWidth,
-                      styleSeed: stack[i].styleSeed,
-                      showCaption: false,
-                      onTap: () =>
-                          _cardDetails(stack[i], cards.indexOf(stack[i])),
+                    top: bottomCardTop,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: backColor,
+                        borderRadius: BorderRadius.circular(28),
+                      ),
                     ),
                   ),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  top: pocketTop - hump,
-                  bottom: 0,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: () => setState(() => tab = 1),
-                    child: CustomPaint(
-                      painter: _WalletPocketPainter(
-                        hump: hump,
-                        color: bottomBarBackground,
-                      ),
-                      child: Padding(
-                        padding: EdgeInsets.fromLTRB(20, hump + 20, 20, 18),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              '${cards.length} saved ${cards.length == 1 ? 'card' : 'cards'}',
-                              style: TextStyle(
-                                color: bottomBarSelected,
-                                fontSize: 22,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            Text(
-                              'View wallet',
-                              style: TextStyle(
-                                color: bottomBarUnselected,
-                                fontSize: 12,
-                              ),
+                  for (var i = 0; i < count; i++)
+                    Positioned(
+                      top: inset + i * peek,
+                      left: inset + (count - 1 - i) * taper,
+                      right: inset + (count - 1 - i) * taper,
+                      height: cardWidth * .63,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(20),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: .32),
+                              blurRadius: 16,
+                              spreadRadius: -2,
+                              offset: const Offset(0, -6),
                             ),
                           ],
+                        ),
+                        child: RepaintBoundary(
+                          child: cardBuilder(
+                            i,
+                            width - (inset + (count - 1 - i) * taper) * 2,
+                          ),
+                        ),
+                      ),
+                    ),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    top: pocketTop - hump,
+                    bottom: 0,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: onOpen,
+                      child: CustomPaint(
+                        painter: _WalletPocketPainter(
+                          hump: hump,
+                          color: pocketColor,
+                        ),
+                        child: Padding(
+                          padding: EdgeInsets.fromLTRB(22, hump + 20, 22, 18),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                caption,
+                                style: TextStyle(
+                                  color: bottomBarUnselected,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  letterSpacing: 1.2,
+                                ),
+                              ),
+                              Row(
+                                children: [
+                                  Text(
+                                    '$total',
+                                    style: TextStyle(
+                                      color: bottomBarSelected,
+                                      fontSize: 30,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  Text(
+                                    'View wallet',
+                                    style: TextStyle(
+                                      color: bottomBarUnselected,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
                   ),
+                ],
+              ),
+            );
+          },
+        ),
+      );
+
+  List<IdentityDocument> identityDocs = [];
+  final Map<String, Future<Uint8List>> _identityArtworkCache = {};
+
+  Future<Uint8List> _identityArtworkBytes(String path) =>
+      _identityArtworkCache.putIfAbsent(path, () async {
+        final encrypted = await File(path).readAsString();
+        final encoded = await SecureCardData.decryptText(encrypted);
+        return base64Decode(encoded);
+      });
+
+  Widget _identityArtworkImage(String path, double width) =>
+      FutureBuilder<Uint8List>(
+        future: _identityArtworkBytes(path),
+        builder: (context, snapshot) {
+          if (snapshot.hasData) {
+            return Image.memory(snapshot.data!,
+                fit: BoxFit.cover,
+                cacheWidth: (width * 3).round(),
+                errorBuilder: (_, __, ___) => Container(color: softSurface));
+          }
+          return Container(color: softSurface);
+        },
+      );
+
+  String _maskedIdentityNumber(String value) {
+    final compact = value.replaceAll(RegExp(r'\s'), '');
+    final visible =
+        compact.length > 4 ? compact.substring(compact.length - 4) : compact;
+    return compact.isEmpty ? '' : '•••• $visible';
+  }
+
+  Widget _identityFace(IdentityDocument doc, double width,
+      {bool artworkIsTemporary = false}) {
+    final idNumber = doc.idNumber.replaceAll(RegExp(r'\s'), '');
+    final lastFour = idNumber.length > 4
+        ? idNumber.substring(idNumber.length - 4)
+        : idNumber;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        width: width,
+        height: width * .63,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          color: const Color(0xFF1B1C1F),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: .16),
+              blurRadius: 18,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: Stack(fit: StackFit.expand, children: [
+          if (doc.artworkPath != null && File(doc.artworkPath!).existsSync())
+            Positioned.fill(
+              child: artworkIsTemporary
+                  ? Image.file(
+                      File(doc.artworkPath!),
+                      fit: BoxFit.cover,
+                      cacheWidth: (width * 3).round(),
+                    )
+                  : _identityArtworkImage(doc.artworkPath!, width),
+            ),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: doc.artworkPath != null &&
+                        File(doc.artworkPath!).existsSync()
+                    ? [
+                        Colors.black.withValues(alpha: .28),
+                        Colors.black.withValues(alpha: .72),
+                      ]
+                    : [const Color(0xFF393A3F), const Color(0xFF171719)],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Expanded(
+                    child: Text(doc.type.toUpperCase(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 1.1)),
+                  ),
+                  const HugeIcon(
+                    icon: HugeIcons.strokeRoundedIdCard,
+                    color: Colors.white,
+                  ),
+                ]),
+                const Spacer(),
+                if (idNumber.isNotEmpty) ...[
+                  Text('••••  ••••  $lastFour',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 1)),
+                  const SizedBox(height: 8),
+                ],
+                Text(
+                  doc.holder.isEmpty ? 'HOLDER NAME' : doc.holder.toUpperCase(),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: .6,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(doc.expiryLabel,
+                    style: TextStyle(
+                      color: doc.expired
+                          ? const Color(0xFFFFB4B4)
+                          : Colors.white.withValues(alpha: .8),
+                      fontSize: 10,
+                    )),
+              ],
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Future<void> _persistIdentity(IdentityDocument doc) async {
+    final database = await LocalDatabase.instance.database;
+    doc.secureDetails = doc.idNumber.trim().isEmpty
+        ? ''
+        : await SecureCardData.encryptText(doc.idNumber.trim());
+    if (doc.id == null) {
+      doc.id = await database.insert('identity_documents', doc.toRow());
+      identityDocs.add(doc);
+    } else {
+      await database.update(
+        'identity_documents',
+        doc.toRow(),
+        where: 'id = ?',
+        whereArgs: [doc.id],
+      );
+      final index = identityDocs.indexWhere((item) => item.id == doc.id);
+      if (index >= 0) identityDocs[index] = doc;
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _deleteIdentity(IdentityDocument doc) async {
+    final database = await LocalDatabase.instance.database;
+    await database.delete(
+      'identity_documents',
+      where: 'id = ?',
+      whereArgs: [doc.id],
+    );
+    identityDocs.removeWhere((item) => item.id == doc.id);
+    if (doc.artworkPath != null) {
+      _identityArtworkCache.remove(doc.artworkPath);
+      try {
+        await File(doc.artworkPath!).delete();
+      } catch (_) {}
+    }
+    if (mounted) setState(() {});
+  }
+
+  Widget _identityTab() => SilkyScroll(
+      physics: const BouncingScrollPhysics(),
+      edgeLockingDelay: Duration.zero,
+      overScrollingLockingDelay: Duration.zero,
+      builder: (_, scrollController, scrollPhysics) => ListView(
+            controller: scrollController,
+            physics: scrollPhysics,
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 96),
+            children: [
+              const Text(
+                'Identity documents',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '${identityDocs.length} saved · ID numbers encrypted on this device',
+                style: TextStyle(color: muted),
+              ),
+              const SizedBox(height: 18),
+              if (identityDocs.isEmpty)
+                _empty(
+                  'Your documents will live here',
+                  'Track expiry dates for Aadhaar, PAN, driving licence and more.',
+                  HugeIcons.strokeRoundedIdCard,
+                  button: 'Add your first document',
+                  onTap: () => _editIdentity(),
+                )
+              else if (identityDocs.length == 1)
+                GestureDetector(
+                  onTap: () => _identityDetails(identityDocs.single),
+                  child: LayoutBuilder(
+                    builder: (context, constraints) => _identityFace(
+                        identityDocs.single, constraints.maxWidth),
+                  ),
+                )
+              else
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CardWalletStack<IdentityDocument>(
+                      cards: identityDocs,
+                      cardBuilder: (doc, width, front) => GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: front ? () => _identityDetails(doc) : null,
+                        child: _identityFace(doc, width),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Center(
+                        child: Text(
+                          'Swipe up or down to browse documents',
+                          style: TextStyle(color: muted, fontSize: 12),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+            ],
+          ));
+
+  void _identityDetails(IdentityDocument doc) {
+    var revealIdNumber = false;
+    final idNumber = doc.idNumber.trim();
+    final compactIdNumber = idNumber.replaceAll(RegExp(r'\s'), '');
+    final maskedIdNumber = compactIdNumber.isEmpty
+        ? 'Not entered'
+        : '•••• •••• ${compactIdNumber.length > 4 ? compactIdNumber.substring(compactIdNumber.length - 4) : compactIdNumber}';
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: surface,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDetails) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: _identityFace(
+                    doc,
+                    (MediaQuery.sizeOf(ctx).width - 40).clamp(260.0, 360.0),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  decoration: BoxDecoration(
+                    color: softSurface,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Column(
+                    children: [
+                      _detailItem('Document', doc.type),
+                      const Divider(height: 1),
+                      _detailItem(
+                          'Holder', doc.holder.isEmpty ? '—' : doc.holder),
+                      const Divider(height: 1),
+                      _detailItem(
+                        'ID number',
+                        revealIdNumber ? idNumber : maskedIdNumber,
+                        trailing: idNumber.isEmpty
+                            ? null
+                            : Row(mainAxisSize: MainAxisSize.min, children: [
+                                IconButton(
+                                  tooltip: revealIdNumber
+                                      ? 'Hide ID number'
+                                      : 'Reveal ID number',
+                                  onPressed: () async {
+                                    if (revealIdNumber) {
+                                      revealIdNumber = false;
+                                    } else if (await _authenticateSensitiveData()) {
+                                      revealIdNumber = true;
+                                    }
+                                    if (ctx.mounted) setDetails(() {});
+                                  },
+                                  icon: HugeIcon(
+                                    icon: revealIdNumber
+                                        ? HugeIcons.strokeRoundedEyeOff
+                                        : HugeIcons.strokeRoundedEye,
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Copy ID number',
+                                  onPressed: () async {
+                                    if (await _authenticateSensitiveData()) {
+                                      await _copyCardDetail(
+                                          idNumber, 'ID number');
+                                    }
+                                  },
+                                  icon: const HugeIcon(
+                                      icon: HugeIcons.strokeRoundedCopy),
+                                ),
+                              ]),
+                      ),
+                      const Divider(height: 1),
+                      _detailItem('Expiry', doc.expiryLabel),
+                      const Divider(height: 1),
+                      _detailItem('Note', doc.note.isEmpty ? '—' : doc.note),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    OutlinedButton(
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _editIdentity(existing: doc);
+                      },
+                      child: const Text('Edit'),
+                    ),
+                    const Spacer(),
+                    TextButton(
+                      onPressed: () async {
+                        final confirmed = await showDialog<bool>(
+                          context: ctx,
+                          builder: (dialogContext) => AlertDialog(
+                            title: const Text('Delete this document?'),
+                            content: const Text(
+                                'This removes the saved entry from this device.'),
+                            actions: [
+                              TextButton(
+                                onPressed: () =>
+                                    Navigator.pop(dialogContext, false),
+                                child: const Text('Cancel'),
+                              ),
+                              TextButton(
+                                onPressed: () =>
+                                    Navigator.pop(dialogContext, true),
+                                child: const Text('Delete',
+                                    style: TextStyle(color: Colors.redAccent)),
+                              ),
+                            ],
+                          ),
+                        );
+                        if (confirmed != true) return;
+                        if (ctx.mounted) Navigator.pop(ctx);
+                        await _deleteIdentity(doc);
+                      },
+                      child: const Text(
+                        'Delete',
+                        style: TextStyle(color: Colors.redAccent),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
-          );
-        },
-      );
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _editIdentity({IdentityDocument? existing}) async {
+    var type = existing?.type ?? identityDocumentTypes.first;
+    final holder = TextEditingController(text: existing?.holder),
+        idNumber = TextEditingController(text: existing?.idNumber),
+        expiry = TextEditingController(
+            text: existing == null || existing.expiry.length < 7
+                ? ''
+                : '${existing.expiry.substring(5, 7)}/${existing.expiry.substring(0, 4)}'),
+        note = TextEditingController(text: existing?.note);
+    String? artworkPath = existing?.artworkPath;
+    String? pickedArtworkPath;
+    final formKey = GlobalKey<FormState>();
+    Future<dynamic>? sheetTransitionCompleted;
+    await Navigator.of(context).push<void>(
+      cardyPageRoute<void>((ctx) {
+        sheetTransitionCompleted = ModalRoute.of(ctx)?.completed;
+        return Scaffold(
+          appBar: AppBar(
+            title: Text(existing == null ? 'Add a document' : 'Edit document'),
+          ),
+          body: SafeArea(
+            child: StatefulBuilder(
+              builder: (ctx, setSheet) => SilkyScroll(
+                  physics: const BouncingScrollPhysics(),
+                  edgeLockingDelay: Duration.zero,
+                  overScrollingLockingDelay: Duration.zero,
+                  builder: (_, scrollController, scrollPhysics) =>
+                      SingleChildScrollView(
+                        controller: scrollController,
+                        physics: scrollPhysics,
+                        padding: EdgeInsets.fromLTRB(
+                          20,
+                          8,
+                          20,
+                          20 + MediaQuery.of(ctx).viewInsets.bottom,
+                        ),
+                        child: Form(
+                          key: formKey,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _formRow(AppDropdown<String>(
+                                initialItem: type,
+                                labelText: 'Document',
+                                items: identityDocumentTypes,
+                                onChanged: (value) =>
+                                    setSheet(() => type = value ?? type),
+                              )),
+                              _formRow(TextFormField(
+                                controller: holder,
+                                decoration:
+                                    _sheetFieldDecoration('Holder name'),
+                                onChanged: (_) => setSheet(() {}),
+                              )),
+                              _formRow(TextFormField(
+                                controller: idNumber,
+                                textCapitalization:
+                                    TextCapitalization.characters,
+                                inputFormatters: [
+                                  LengthLimitingTextInputFormatter(32)
+                                ],
+                                decoration: _sheetFieldDecoration('ID number'),
+                                validator: (value) =>
+                                    (value == null || value.trim().isEmpty)
+                                        ? 'Enter the ID number'
+                                        : null,
+                                onChanged: (_) => setSheet(() {}),
+                              )),
+                              if (artworkPath != null &&
+                                  File(artworkPath!).existsSync())
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 12),
+                                  child: Center(
+                                    child: _identityFace(
+                                      IdentityDocument(
+                                        type: type,
+                                        holder: holder.text,
+                                        idNumber: idNumber.text,
+                                        expiry: '',
+                                        note: '',
+                                        createdAt: DateTime.now(),
+                                        artworkPath: artworkPath,
+                                      ),
+                                      (MediaQuery.sizeOf(ctx).width - 40)
+                                          .clamp(260.0, 360.0),
+                                      artworkIsTemporary:
+                                          pickedArtworkPath != null,
+                                    ),
+                                  ),
+                                ),
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 12),
+                                child: Wrap(
+                                  spacing: 8,
+                                  children: [
+                                    OutlinedButton.icon(
+                                      onPressed: () async {
+                                        final image =
+                                            await ImagePicker().pickImage(
+                                          source: ImageSource.gallery,
+                                          maxWidth: 1000,
+                                          maxHeight: 1000,
+                                          imageQuality: 78,
+                                        );
+                                        if (image == null) return;
+                                        setSheet(() {
+                                          artworkPath = image.path;
+                                          pickedArtworkPath = image.path;
+                                        });
+                                      },
+                                      icon: const HugeIcon(
+                                          icon: HugeIcons.strokeRoundedImage01),
+                                      label: Text(artworkPath == null
+                                          ? 'Add document artwork'
+                                          : 'Change artwork'),
+                                    ),
+                                    if (artworkPath != null)
+                                      TextButton(
+                                        onPressed: () => setSheet(() {
+                                          artworkPath = null;
+                                          pickedArtworkPath = null;
+                                        }),
+                                        child: const Text('Remove'),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                              _formRow(TextFormField(
+                                controller: expiry,
+                                keyboardType: TextInputType.number,
+                                inputFormatters: [
+                                  FilteringTextInputFormatter.allow(
+                                      RegExp(r'[0-9/]')),
+                                  LengthLimitingTextInputFormatter(7),
+                                ],
+                                onChanged: (value) {
+                                  final digits =
+                                      value.replaceAll(RegExp(r'\D'), '');
+                                  final formatted = digits.length > 2
+                                      ? '${digits.substring(0, 2)}/${digits.substring(2, digits.length.clamp(2, 6).toInt())}'
+                                      : digits;
+                                  if (formatted != value) {
+                                    expiry.value = TextEditingValue(
+                                        text: formatted,
+                                        selection: TextSelection.collapsed(
+                                            offset: formatted.length));
+                                  }
+                                },
+                                validator: (value) {
+                                  final text = value ?? '';
+                                  if (text.isEmpty) return null;
+                                  return RegExp(r'^(0[1-9]|1[0-2])/\d{4}$')
+                                          .hasMatch(text)
+                                      ? null
+                                      : 'Use MM/YYYY or leave blank';
+                                },
+                                decoration: _sheetFieldDecoration(
+                                    'Expiry (MM/YYYY)',
+                                    hint: 'Leave blank if none'),
+                              )),
+                              _formRow(TextFormField(
+                                controller: note,
+                                maxLines: 3,
+                                decoration: _sheetFieldDecoration('Note',
+                                    hint: 'Optional reminder'),
+                                validator: (value) => RegExp(r'\d{4,}')
+                                        .hasMatch(value ?? '')
+                                    ? 'Keep ID numbers in the ID number field'
+                                    : null,
+                              )),
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 12),
+                                child: Text(
+                                  'ID numbers and artwork are encrypted on this device.',
+                                  style: TextStyle(color: muted, fontSize: 12),
+                                ),
+                              ),
+                              SizedBox(
+                                width: double.infinity,
+                                child: FilledButton(
+                                  onPressed: () async {
+                                    if (!(formKey.currentState?.validate() ??
+                                        false)) {
+                                      return;
+                                    }
+                                    final parts = expiry.text.split('/');
+                                    final document = IdentityDocument(
+                                      id: existing?.id,
+                                      type: type,
+                                      holder: holder.text.trim(),
+                                      expiry: parts.length == 2
+                                          ? '${parts[1]}-${parts[0]}'
+                                          : '',
+                                      note: note.text.trim(),
+                                      idNumber: idNumber.text.trim(),
+                                      artworkPath: artworkPath,
+                                      createdAt:
+                                          existing?.createdAt ?? DateTime.now(),
+                                    );
+                                    String? copiedArtwork;
+                                    try {
+                                      if (pickedArtworkPath != null) {
+                                        final directory = Directory(p.join(
+                                            await getDatabasesPath(),
+                                            'identity_art'));
+                                        await directory.create(recursive: true);
+                                        copiedArtwork = p.join(directory.path,
+                                            'id_${DateTime.now().microsecondsSinceEpoch}.enc');
+                                        final artworkBytes =
+                                            await File(pickedArtworkPath!)
+                                                .readAsBytes();
+                                        final encryptedArtwork =
+                                            await SecureCardData.encryptText(
+                                                base64Encode(artworkBytes));
+                                        await File(copiedArtwork)
+                                            .writeAsString(encryptedArtwork);
+                                        document.artworkPath = copiedArtwork;
+                                      }
+                                      await _persistIdentity(document);
+                                    } catch (error) {
+                                      if (copiedArtwork != null) {
+                                        _identityArtworkCache
+                                            .remove(copiedArtwork);
+                                        try {
+                                          await File(copiedArtwork).delete();
+                                        } catch (_) {}
+                                      }
+                                      if (ctx.mounted) {
+                                        ScaffoldMessenger.of(ctx).showSnackBar(
+                                          SnackBar(
+                                              content: Text(
+                                                  'Could not save document: $error')),
+                                        );
+                                      }
+                                      return;
+                                    }
+                                    if (existing?.artworkPath != null &&
+                                        existing!.artworkPath !=
+                                            document.artworkPath) {
+                                      _identityArtworkCache
+                                          .remove(existing.artworkPath);
+                                      try {
+                                        await File(existing.artworkPath!)
+                                            .delete();
+                                      } catch (_) {}
+                                    }
+                                    if (ctx.mounted) Navigator.pop(ctx);
+                                  },
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: accentColor,
+                                    foregroundColor: isCardyDarkMode
+                                        ? const Color(0xFF111111)
+                                        : Colors.white,
+                                  ),
+                                  child: Text(existing == null
+                                      ? 'Save document'
+                                      : 'Save changes'),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      )),
+            ),
+          ),
+        );
+      }),
+    );
+    final exitedPage = sheetTransitionCompleted;
+    if (exitedPage != null) await exitedPage;
+    for (final controller in [holder, idNumber, expiry, note]) {
+      controller.dispose();
+    }
+  }
 
   Widget _myCards() {
     final banks = cards
@@ -698,142 +1472,775 @@ class _CardyHomeState extends State<CardyHome> {
           (_bankFilter == null || card.bank == _bankFilter) &&
           (_networkFilter == null || card.network == _networkFilter);
     }).toList();
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 8, 20, 96),
-      children: [
-        const Text(
-          'Your wallet',
-          style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+    return SilkyScroll(
+        physics: const BouncingScrollPhysics(),
+        edgeLockingDelay: Duration.zero,
+        overScrollingLockingDelay: Duration.zero,
+        builder: (_, scrollController, scrollPhysics) => ListView(
+              controller: scrollController,
+              physics: scrollPhysics,
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 96),
+              children: [
+                const Text(
+                  'Your wallet',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '${cards.length} saved ${cards.length == 1 ? 'card' : 'cards'} · Stored on this device',
+                  style: TextStyle(color: muted),
+                ),
+                const SizedBox(height: 18),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    ChoiceChip(
+                      label: const Text('All'),
+                      selected: _activeFilter == 'All',
+                      onSelected: (_) {
+                        _resetWalletPage();
+                        setState(() => _activeFilter = 'All');
+                      },
+                    ),
+                    ChoiceChip(
+                      label: const Text('Active'),
+                      selected: _activeFilter == 'Active',
+                      onSelected: (_) {
+                        _resetWalletPage();
+                        setState(() => _activeFilter = 'Active');
+                      },
+                    ),
+                    ChoiceChip(
+                      label: const Text('Paused'),
+                      selected: _activeFilter == 'Paused',
+                      onSelected: (_) {
+                        _resetWalletPage();
+                        setState(() => _activeFilter = 'Paused');
+                      },
+                    ),
+                    if (banks.isNotEmpty)
+                      SizedBox(
+                        width: 160,
+                        child: AppDropdown<String>(
+                          initialItem: _bankFilter ?? 'All banks',
+                          labelText: 'Bank',
+                          items: ['All banks', ...banks],
+                          onChanged: (value) {
+                            _resetWalletPage();
+                            setState(() => _bankFilter =
+                                value == 'All banks' ? null : value);
+                          },
+                        ),
+                      ),
+                    if (networks.isNotEmpty)
+                      SizedBox(
+                        width: 160,
+                        child: AppDropdown<String>(
+                          initialItem: _networkFilter ?? 'All networks',
+                          labelText: 'Network',
+                          items: ['All networks', ...networks],
+                          onChanged: (value) {
+                            _resetWalletPage();
+                            setState(() => _networkFilter =
+                                value == 'All networks' ? null : value);
+                          },
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                if (cards.isEmpty)
+                  _empty(
+                    'Your cards will live here',
+                    'Browse the card catalogue or enter your card details manually.',
+                    HugeIcons.strokeRoundedCreditCard,
+                    button: 'Add your first card',
+                    onTap: _editCard,
+                  )
+                else if (filteredCards.isEmpty)
+                  Padding(
+                    padding: EdgeInsets.symmetric(vertical: 32),
+                    child: Center(
+                        child: Text('No cards match these filters.',
+                            style: TextStyle(color: muted))),
+                  )
+                else if (filteredCards.length == 1)
+                  SizedBox(
+                    height: 370,
+                    child: Center(
+                      child: _cardTile(
+                        filteredCards.single,
+                        width: double.infinity,
+                        styleSeed: filteredCards.single.styleSeed,
+                        onTap: () => _cardDetails(filteredCards.single,
+                            cards.indexOf(filteredCards.single)),
+                      ),
+                    ),
+                  )
+                else
+                  CardWalletStack(
+                    key: ValueKey(_walletResetKey),
+                    cards: filteredCards,
+                    cardBuilder: (card, width, front) => Hero(
+                      tag:
+                          'wallet-card-${card.databaseId ?? identityHashCode(card)}',
+                      child: _cardTile(
+                        card,
+                        width: width,
+                        styleSeed: card.styleSeed,
+                        showCaption: false,
+                        onTap: front
+                            ? () => _cardDetails(card, cards.indexOf(card))
+                            : null,
+                      ),
+                    ),
+                  ),
+                if (filteredCards.length > 1)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Center(
+                      child: Text(
+                        'Swipe up or down to browse cards',
+                        style: TextStyle(color: muted, fontSize: 12),
+                      ),
+                    ),
+                  ),
+              ],
+            ));
+  }
+
+  List<DebitCard> debitCards = [];
+
+  static const _debitNetworks = [
+    'Visa',
+    'Mastercard',
+    'RuPay',
+    'American Express',
+    'Diners Club International',
+    'Discover',
+    'JCB',
+    'Other',
+  ];
+
+  String _debitNetwork(DebitCard card) =>
+      card.network.isEmpty ? _networkFromNumber(card.cardNumber) : card.network;
+
+  CreditCard _debitPreview(DebitCard card) => CreditCard(
+        bank: card.bank,
+        name: card.label,
+        nickname: card.holder,
+        network: _debitNetwork(card),
+        cardNumber: card.cardNumber,
+        expiryDate: card.expiryDate,
+        cvv: card.cvv,
+        styleSeed: card.styleSeed,
+        artworkPath: card.artworkPath,
+      );
+
+  Future<void> _persistDebit(DebitCard card) async {
+    final database = await LocalDatabase.instance.database;
+    card.secureDetails = await SecureCardData.encrypt(
+      number: card.cardNumber,
+      expiry: card.expiryDate,
+      cvv: card.cvv,
+    );
+    if (card.id == null) {
+      card.id = await database.insert('debit_cards', card.toRow());
+      debitCards.add(card);
+    } else {
+      await database.update(
+        'debit_cards',
+        card.toRow(),
+        where: 'id = ?',
+        whereArgs: [card.id],
+      );
+      final index = debitCards.indexWhere((item) => item.id == card.id);
+      if (index >= 0) debitCards[index] = card;
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _deleteDebit(DebitCard card) async {
+    final database = await LocalDatabase.instance.database;
+    await database.delete('debit_cards', where: 'id = ?', whereArgs: [card.id]);
+    debitCards.removeWhere((item) => item.id == card.id);
+    if (mounted) setState(() {});
+  }
+
+  Widget _debitTab() => SilkyScroll(
+      physics: const BouncingScrollPhysics(),
+      edgeLockingDelay: Duration.zero,
+      overScrollingLockingDelay: Duration.zero,
+      builder: (_, scrollController, scrollPhysics) => ListView(
+            controller: scrollController,
+            physics: scrollPhysics,
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 96),
+            children: [
+              const Text(
+                'Your debit cards',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '${debitCards.length} saved ${debitCards.length == 1 ? 'card' : 'cards'} · Encrypted on this device',
+                style: TextStyle(color: muted),
+              ),
+              const SizedBox(height: 18),
+              if (debitCards.isEmpty)
+                _empty(
+                  'Your debit cards will live here',
+                  'Save debit card details securely on this device.',
+                  HugeIcons.strokeRoundedWallet01,
+                  button: 'Add your first debit card',
+                  onTap: () => _editDebitCard(),
+                )
+              else if (debitCards.length == 1)
+                SizedBox(
+                  height: 370,
+                  child: Center(
+                    child: _cardTile(
+                      _debitPreview(debitCards.single),
+                      width: double.infinity,
+                      styleSeed: debitCards.single.styleSeed,
+                      onTap: () => _debitDetails(debitCards.single),
+                    ),
+                  ),
+                )
+              else
+                CardWalletStack<DebitCard>(
+                  cards: debitCards,
+                  cardBuilder: (card, width, front) => _cardTile(
+                    _debitPreview(card),
+                    width: width,
+                    styleSeed: card.styleSeed,
+                    showCaption: false,
+                    onTap: front ? () => _debitDetails(card) : null,
+                  ),
+                ),
+              if (debitCards.length > 1)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Center(
+                    child: Text(
+                      'Swipe up or down to browse cards',
+                      style: TextStyle(color: muted, fontSize: 12),
+                    ),
+                  ),
+                ),
+            ],
+          ));
+
+  void _debitDetails(DebitCard card) {
+    var revealed = false;
+    final last4 = card.cardNumber.length >= 4
+        ? card.cardNumber.substring(card.cardNumber.length - 4)
+        : '••••';
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: surface,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDetails) => SafeArea(
+          child: SilkyScroll(
+              physics: const BouncingScrollPhysics(),
+              edgeLockingDelay: Duration.zero,
+              overScrollingLockingDelay: Duration.zero,
+              builder: (_, scrollController, scrollPhysics) =>
+                  SingleChildScrollView(
+                    controller: scrollController,
+                    physics: scrollPhysics,
+                    padding: EdgeInsets.fromLTRB(
+                      20,
+                      20,
+                      20,
+                      20 + MediaQuery.of(ctx).viewInsets.bottom,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _cardPreview(
+                          bank: card.bank,
+                          name: card.label,
+                          nickname: card.holder,
+                          number: card.cardNumber,
+                          expiry: card.expiryDate,
+                          network: _debitNetwork(card),
+                          styleSeed: card.styleSeed,
+                          showBack: false,
+                          cvv: card.cvv,
+                          artworkPath: card.artworkPath,
+                        ),
+                        const SizedBox(height: 16),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 14),
+                          decoration: BoxDecoration(
+                            color: surface,
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: Column(
+                            children: [
+                              _detailItem('Bank / issuer', card.bank),
+                              const Divider(height: 1),
+                              _detailItem('Label',
+                                  card.label.isEmpty ? '—' : card.label),
+                              const Divider(height: 1),
+                              _detailItem(
+                                'Card holder',
+                                card.holder.isEmpty ? '—' : card.holder,
+                              ),
+                              const Divider(height: 1),
+                              _detailItem(
+                                'Card number',
+                                revealed
+                                    ? _spacedDigits(card.cardNumber)
+                                    : '•••• •••• •••• $last4',
+                              ),
+                              const Divider(height: 1),
+                              _detailItem(
+                                'Expiry',
+                                revealed && card.expiryDate.isNotEmpty
+                                    ? card.expiryDate
+                                    : '••/••',
+                              ),
+                              const Divider(height: 1),
+                              _detailItem(
+                                'CVV',
+                                revealed && card.cvv.isNotEmpty
+                                    ? card.cvv
+                                    : '•••',
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        OutlinedButton.icon(
+                          onPressed: () async {
+                            if (!revealed &&
+                                !await _authenticateSensitiveData()) {
+                              return;
+                            }
+                            setDetails(() => revealed = !revealed);
+                          },
+                          icon: HugeIcon(
+                              icon: revealed
+                                  ? HugeIcons.strokeRoundedEyeOff
+                                  : HugeIcons.strokeRoundedEye),
+                          label: Text(
+                              revealed ? 'Hide details' : 'Reveal details'),
+                        ),
+                        Row(
+                          children: [
+                            OutlinedButton(
+                              onPressed: () {
+                                Navigator.pop(ctx);
+                                _editDebitCard(existing: card);
+                              },
+                              child: const Text('Edit'),
+                            ),
+                            const Spacer(),
+                            TextButton(
+                              onPressed: () async {
+                                final confirmed = await showDialog<bool>(
+                                  context: ctx,
+                                  builder: (dialogContext) => AlertDialog(
+                                    title:
+                                        const Text('Delete this debit card?'),
+                                    content: const Text(
+                                        'This removes the saved details from this device.'),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.pop(dialogContext, false),
+                                        child: const Text('Cancel'),
+                                      ),
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.pop(dialogContext, true),
+                                        child: const Text('Delete',
+                                            style: TextStyle(
+                                                color: Colors.redAccent)),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                                if (confirmed != true) return;
+                                if (ctx.mounted) Navigator.pop(ctx);
+                                await _deleteDebit(card);
+                              },
+                              child: const Text(
+                                'Delete',
+                                style: TextStyle(color: Colors.redAccent),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  )),
         ),
-        const SizedBox(height: 6),
-        Text(
-          '${cards.length} saved ${cards.length == 1 ? 'card' : 'cards'} · Stored on this device',
-          style: TextStyle(color: muted),
-        ),
-        const SizedBox(height: 18),
-        Wrap(
-          spacing: 8,
-          runSpacing: 6,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            ChoiceChip(
-              label: const Text('All'),
-              selected: _activeFilter == 'All',
-              onSelected: (_) {
-                _resetWalletPage();
-                setState(() => _activeFilter = 'All');
-              },
-            ),
-            ChoiceChip(
-              label: const Text('Active'),
-              selected: _activeFilter == 'Active',
-              onSelected: (_) {
-                _resetWalletPage();
-                setState(() => _activeFilter = 'Active');
-              },
-            ),
-            ChoiceChip(
-              label: const Text('Paused'),
-              selected: _activeFilter == 'Paused',
-              onSelected: (_) {
-                _resetWalletPage();
-                setState(() => _activeFilter = 'Paused');
-              },
-            ),
-            if (banks.isNotEmpty)
-              DropdownButton<String?>(
-                value: _bankFilter,
-                hint: const Text('Bank'),
-                underline: const SizedBox.shrink(),
-                items: [
-                  const DropdownMenuItem<String?>(
-                      value: null, child: Text('All banks')),
-                  ...banks.map((bank) => DropdownMenuItem<String?>(
-                      value: bank, child: Text(bank))),
-                ],
-                onChanged: (value) {
-                  _resetWalletPage();
-                  setState(() => _bankFilter = value);
-                },
-              ),
-            if (networks.isNotEmpty)
-              DropdownButton<String?>(
-                value: _networkFilter,
-                hint: const Text('Network'),
-                underline: const SizedBox.shrink(),
-                items: [
-                  const DropdownMenuItem<String?>(
-                      value: null, child: Text('All networks')),
-                  ...networks.map((network) => DropdownMenuItem<String?>(
-                      value: network, child: Text(network))),
-                ],
-                onChanged: (value) {
-                  _resetWalletPage();
-                  setState(() => _networkFilter = value);
-                },
-              ),
-          ],
-        ),
-        const SizedBox(height: 14),
-        if (cards.isEmpty)
-          _empty(
-            'Your cards will live here',
-            'Browse the card catalogue or enter your card details manually.',
-            HugeIcons.strokeRoundedCreditCard,
-            button: 'Add your first card',
-            onTap: _editCard,
-          )
-        else if (filteredCards.isEmpty)
-          Padding(
-            padding: EdgeInsets.symmetric(vertical: 32),
-            child: Center(
-                child: Text('No cards match these filters.',
-                    style: TextStyle(color: muted))),
-          )
-        else if (filteredCards.length == 1)
-          SizedBox(
-            height: 370,
-            child: Center(
-              child: _cardTile(
-                filteredCards.single,
-                width: double.infinity,
-                styleSeed: filteredCards.single.styleSeed,
-                onTap: () => _cardDetails(filteredCards.single,
-                    cards.indexOf(filteredCards.single)),
-              ),
-            ),
-          )
-        else
-          CardWalletStack(
-            key: ValueKey(_walletResetKey),
-            cards: filteredCards,
-            cardBuilder: (card, width, front) => Hero(
-              tag: 'wallet-card-${card.databaseId ?? identityHashCode(card)}',
-              child: _cardTile(
-                card,
-                width: width,
-                styleSeed: card.styleSeed,
-                showCaption: false,
-                onTap:
-                    front ? () => _cardDetails(card, cards.indexOf(card)) : null,
-              ),
-            ),
-          ),
-        if (filteredCards.length > 1)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Center(
-              child: Text(
-                'Swipe up or down to browse cards',
-                style: TextStyle(color: muted, fontSize: 12),
-              ),
-            ),
-          ),
-      ],
+      ),
     );
   }
 
-  Widget _compare() => ComparePage(cards: cards);
+  String _spacedDigits(String digits) => digits
+      .replaceAllMapped(RegExp(r'.{1,4}'), (match) => '${match.group(0)} ')
+      .trim();
+
+  Future<void> _editDebitCard({DebitCard? existing}) async {
+    final bank = TextEditingController(text: existing?.bank),
+        label = TextEditingController(text: existing?.label),
+        holder = TextEditingController(text: existing?.holder),
+        cardNumber = TextEditingController(text: existing?.cardNumber ?? ''),
+        expiry = TextEditingController(text: existing?.expiryDate ?? ''),
+        cvv = TextEditingController(text: existing?.cvv ?? '');
+    final formKey = GlobalKey<FormState>();
+    var revealNumber = false;
+    var revealCvv = false;
+    var networkChoice = existing?.network ?? '';
+    var artworkPath = existing?.artworkPath;
+    String? pickedArtworkPath;
+    Future<dynamic>? sheetTransitionCompleted;
+    await Navigator.of(context).push<void>(
+      cardyPageRoute<void>((ctx) {
+        sheetTransitionCompleted = ModalRoute.of(ctx)?.completed;
+        return Scaffold(
+          appBar: AppBar(
+            title:
+                Text(existing == null ? 'Add a debit card' : 'Edit debit card'),
+          ),
+          body: SafeArea(
+            child: StatefulBuilder(
+              builder: (ctx, setSheet) {
+                final network = networkChoice.isEmpty
+                    ? _networkFromNumber(cardNumber.text)
+                    : networkChoice;
+                return SilkyScroll(
+                    physics: const BouncingScrollPhysics(),
+                    edgeLockingDelay: Duration.zero,
+                    overScrollingLockingDelay: Duration.zero,
+                    builder: (_, scrollController, scrollPhysics) =>
+                        SingleChildScrollView(
+                          controller: scrollController,
+                          physics: scrollPhysics,
+                          padding: EdgeInsets.fromLTRB(
+                            20,
+                            8,
+                            20,
+                            20 + MediaQuery.of(ctx).viewInsets.bottom,
+                          ),
+                          child: Form(
+                            key: formKey,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _cardPreview(
+                                  bank: bank.text,
+                                  name: label.text,
+                                  nickname: holder.text,
+                                  number: cardNumber.text,
+                                  expiry: expiry.text,
+                                  network: network,
+                                  styleSeed: existing?.styleSeed ??
+                                      DateTime.now().millisecondsSinceEpoch ~/
+                                          1000,
+                                  showBack: false,
+                                  cvv: cvv.text,
+                                  artworkPath: artworkPath,
+                                ),
+                                const SizedBox(height: 16),
+                                _formRow(TextFormField(
+                                  controller: bank,
+                                  onChanged: (_) => setSheet(() {}),
+                                  validator: (value) =>
+                                      (value == null || value.trim().isEmpty)
+                                          ? 'Required'
+                                          : null,
+                                  decoration:
+                                      _sheetFieldDecoration('Bank or issuer'),
+                                )),
+                                _formRow(TextFormField(
+                                  controller: label,
+                                  onChanged: (_) => setSheet(() {}),
+                                  decoration: _sheetFieldDecoration('Label',
+                                      hint: 'e.g. Salary account'),
+                                )),
+                                _formRow(TextFormField(
+                                  controller: holder,
+                                  onChanged: (_) => setSheet(() {}),
+                                  decoration:
+                                      _sheetFieldDecoration('Card holder name'),
+                                )),
+                                _formRow(AppDropdown<String>(
+                                  key: ValueKey(network),
+                                  initialItem: _debitNetworks.contains(network)
+                                      ? network
+                                      : 'Other',
+                                  labelText: 'Card network',
+                                  items: _debitNetworks,
+                                  onChanged: (value) => setSheet(
+                                    () => networkChoice = value ?? 'Other',
+                                  ),
+                                )),
+                                Wrap(spacing: 8, children: [
+                                  OutlinedButton.icon(
+                                    onPressed: () async {
+                                      final image =
+                                          await ImagePicker().pickImage(
+                                        source: ImageSource.gallery,
+                                        maxWidth: 1600,
+                                        imageQuality: 92,
+                                      );
+                                      if (image == null) return;
+                                      setSheet(() {
+                                        artworkPath = image.path;
+                                        pickedArtworkPath = image.path;
+                                      });
+                                    },
+                                    icon: const HugeIcon(
+                                        icon: HugeIcons.strokeRoundedImage01),
+                                    label: Text(artworkPath == null
+                                        ? 'Choose card image'
+                                        : 'Change image'),
+                                  ),
+                                  if (artworkPath != null)
+                                    TextButton(
+                                      onPressed: () => setSheet(() {
+                                        artworkPath = null;
+                                        pickedArtworkPath = null;
+                                      }),
+                                      child: const Text('Use generated style'),
+                                    ),
+                                ]),
+                                const SizedBox(height: 14),
+                                FormField<String>(
+                                  initialValue: cardNumber.text,
+                                  validator: (value) {
+                                    final digits =
+                                        value?.replaceAll(RegExp(r'\D'), '') ??
+                                            '';
+                                    return _hasValidPanLength(
+                                            network, digits.length)
+                                        ? null
+                                        : 'Enter ${_panLength(network)} digits';
+                                  },
+                                  builder: (fieldState) => Padding(
+                                    padding: const EdgeInsets.only(bottom: 14),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        CardNumberBoxes(
+                                          value: cardNumber.text,
+                                          maxLength: _panLength(network),
+                                          obscure: !revealNumber,
+                                          onChanged: (digits) {
+                                            cardNumber.text = digits;
+                                            fieldState.didChange(digits);
+                                            setSheet(() {});
+                                          },
+                                          onToggleVisibility: () => setSheet(
+                                            () => revealNumber = !revealNumber,
+                                          ),
+                                        ),
+                                        if (fieldState.hasError)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                              top: 6,
+                                              left: 12,
+                                            ),
+                                            child: Text(
+                                              fieldState.errorText!,
+                                              style: TextStyle(
+                                                color: Theme.of(ctx)
+                                                    .colorScheme
+                                                    .error,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                Row(children: [
+                                  Expanded(
+                                    child: _paymentField(
+                                      expiry,
+                                      'Expiry date',
+                                      hint: 'MM/YY',
+                                      required: existing == null,
+                                      formatters: [
+                                        FilteringTextInputFormatter.allow(
+                                            RegExp(r'[0-9/]')),
+                                        LengthLimitingTextInputFormatter(5),
+                                      ],
+                                      onChanged: (value) {
+                                        final digits =
+                                            value.replaceAll(RegExp(r'\D'), '');
+                                        final formatted = digits.length > 2
+                                            ? '${digits.substring(0, 2)}/${digits.substring(2, digits.length.clamp(2, 4).toInt())}'
+                                            : digits;
+                                        if (formatted != value) {
+                                          expiry.value = TextEditingValue(
+                                              text: formatted,
+                                              selection:
+                                                  TextSelection.collapsed(
+                                                      offset:
+                                                          formatted.length));
+                                        }
+                                        setSheet(() {});
+                                      },
+                                      validator: (value) {
+                                        if ((value ?? '').isEmpty &&
+                                            existing != null) {
+                                          return null;
+                                        }
+                                        final match = RegExp(
+                                                r'^(0[1-9]|1[0-2])/([0-9]{2})$')
+                                            .firstMatch(value ?? '');
+                                        return match == null
+                                            ? 'Use MM/YY'
+                                            : null;
+                                      },
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: _paymentField(
+                                      cvv,
+                                      'CVV',
+                                      hint: '•••',
+                                      obscure: !revealCvv,
+                                      onToggle: () => setSheet(
+                                          () => revealCvv = !revealCvv),
+                                      onChanged: (_) => setSheet(() {}),
+                                      validator: (value) => value != null &&
+                                              value.isNotEmpty &&
+                                              value.length !=
+                                                  _cvvLength(network)
+                                          ? 'Enter ${_cvvLength(network)} digits'
+                                          : null,
+                                      formatters: [
+                                        FilteringTextInputFormatter.digitsOnly,
+                                        LengthLimitingTextInputFormatter(
+                                            _cvvLength(network)),
+                                      ],
+                                    ),
+                                  ),
+                                ]),
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 12),
+                                  child: Text(
+                                      'Card number, expiry and CVV are encrypted on this device.',
+                                      style: TextStyle(
+                                          color: muted, fontSize: 12)),
+                                ),
+                                SizedBox(
+                                  width: double.infinity,
+                                  child: FilledButton(
+                                    onPressed: () async {
+                                      if (!(formKey.currentState?.validate() ??
+                                          false)) {
+                                        return;
+                                      }
+                                      final number = cardNumber.text.isEmpty
+                                          ? existing?.cardNumber ?? ''
+                                          : cardNumber.text;
+                                      String? savedArtwork = artworkPath;
+                                      if (pickedArtworkPath != null) {
+                                        final directory = Directory(p.join(
+                                            await getDatabasesPath(),
+                                            'card_art'));
+                                        await directory.create(recursive: true);
+                                        final extension = p
+                                            .extension(pickedArtworkPath!)
+                                            .toLowerCase();
+                                        final safeExtension = const {
+                                          '.jpg',
+                                          '.jpeg',
+                                          '.png',
+                                          '.webp'
+                                        }.contains(extension)
+                                            ? extension
+                                            : '.jpg';
+                                        savedArtwork = p.join(directory.path,
+                                            'debit_art_${DateTime.now().microsecondsSinceEpoch}$safeExtension');
+                                        await File(pickedArtworkPath!)
+                                            .copy(savedArtwork);
+                                      }
+                                      final card = DebitCard(
+                                        id: existing?.id,
+                                        bank: bank.text.trim(),
+                                        label: label.text.trim(),
+                                        holder: holder.text.trim(),
+                                        createdAt: existing?.createdAt ??
+                                            DateTime.now(),
+                                        network: networkChoice.isEmpty
+                                            ? _networkFromNumber(number)
+                                            : networkChoice,
+                                        cardNumber: number,
+                                        expiryDate: expiry.text.isEmpty
+                                            ? existing?.expiryDate ?? ''
+                                            : expiry.text,
+                                        cvv: cvv.text.isEmpty
+                                            ? existing?.cvv ?? ''
+                                            : cvv.text,
+                                        artworkPath: savedArtwork,
+                                      );
+                                      try {
+                                        await _persistDebit(card);
+                                        final oldArtwork =
+                                            existing?.artworkPath;
+                                        if (oldArtwork != null &&
+                                            oldArtwork != savedArtwork) {
+                                          try {
+                                            await File(oldArtwork).delete();
+                                          } catch (_) {}
+                                        }
+                                      } catch (error) {
+                                        if (ctx.mounted) {
+                                          ScaffoldMessenger.of(ctx)
+                                              .showSnackBar(
+                                            SnackBar(
+                                                content: Text(
+                                                    'Could not save debit card: $error')),
+                                          );
+                                        }
+                                        return;
+                                      }
+                                      if (ctx.mounted) Navigator.pop(ctx);
+                                    },
+                                    style: FilledButton.styleFrom(
+                                      backgroundColor: accentColor,
+                                      foregroundColor: isCardyDarkMode
+                                          ? const Color(0xFF111111)
+                                          : Colors.white,
+                                    ),
+                                    child: Text(existing == null
+                                        ? 'Save debit card'
+                                        : 'Save changes'),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ));
+              },
+            ),
+          ),
+        );
+      }),
+    );
+    final exitedPage = sheetTransitionCompleted;
+    if (exitedPage != null) await exitedPage;
+    for (final controller in [bank, label, holder, cardNumber, expiry, cvv]) {
+      controller.dispose();
+    }
+  }
+
   Widget _assistant() => AiChatPage(cards: cards);
   Widget _quickAction(
     List<List<dynamic>> icon,
@@ -1045,6 +2452,7 @@ class _CardyHomeState extends State<CardyHome> {
         child: Stack(fit: StackFit.expand, children: [
           Image.file(File(path),
               fit: BoxFit.cover,
+              cacheWidth: (width * 3).round(),
               errorBuilder: (_, __, ___) =>
                   Container(color: const Color(0xFF252936))),
           Padding(
@@ -1439,8 +2847,7 @@ class _CardyHomeState extends State<CardyHome> {
               ? 'Diners Club International'
               : raw.contains('rupay')
                   ? 'RuPay'
-                  : (raw.contains('amex') ||
-                          raw.contains('american express'))
+                  : (raw.contains('amex') || raw.contains('american express'))
                       ? 'American Express'
                       : raw.contains('visa')
                           ? 'Visa'
@@ -1489,8 +2896,7 @@ class _CardyHomeState extends State<CardyHome> {
           nameChoice = names.contains(seedName) ? seedName : null;
           if (nameChoice != null) {
             selectedEntry = catalogCards.firstWhere(
-              (entry) =>
-                  entry.bank == bankChoice && entry.name == nameChoice,
+              (entry) => entry.bank == bankChoice && entry.name == nameChoice,
             );
           }
         }
@@ -1518,474 +2924,501 @@ class _CardyHomeState extends State<CardyHome> {
                   ),
                   child: Form(
                     key: form,
-                    child: SingleChildScrollView(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('Sensitive details are kept on this device.',
-                              style: TextStyle(color: muted)),
-                          const SizedBox(height: 16),
-                          _cardPreview(
-                            bank: bank.text,
-                            name: name.text,
-                            nickname: existing?.nickname ?? '',
-                            number: cardNumber.text,
-                            expiry: expiry.text,
-                            network: network,
-                            styleSeed: styleSeed,
-                            showBack: false,
-                            cvv: cvv.text,
-                            artworkPath: artworkPath,
-                          ),
-                          const SizedBox(height: 8),
-                          Wrap(spacing: 8, children: [
-                            OutlinedButton.icon(
-                              onPressed: () async {
-                                final image = await ImagePicker().pickImage(
-                                  source: ImageSource.gallery,
-                                  maxWidth: 1600,
-                                  imageQuality: 92,
-                                );
-                                if (image == null) return;
-                                setSheet(() {
-                                  artworkPath = image.path;
-                                  pickedArtworkPath = image.path;
-                                });
-                              },
-                              icon: const HugeIcon(
-                                  icon: HugeIcons.strokeRoundedImage01),
-                              label: Text(artworkPath == null
-                                  ? 'Choose card image'
-                                  : 'Change image'),
-                            ),
-                            if (artworkPath != null)
-                              TextButton(
-                                onPressed: () => setSheet(() {
-                                  artworkPath = null;
-                                  pickedArtworkPath = null;
-                                }),
-                                child: const Text('Use generated style'),
-                              ),
-                          ]),
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 12),
-                            child: Text(
-                                'Card artwork is stored only on this device.',
-                                style: TextStyle(color: muted, fontSize: 12)),
-                          ),
-                          const SizedBox(height: 20),
-                          Builder(
-                            builder: (_) {
-                              final banks = catalogCards
-                                  .map((entry) => entry.bank)
-                                  .where((bank) => bank.isNotEmpty)
-                                  .toSet()
-                                  .toList()
-                                ..sort();
-                              if (banks.isEmpty || bankChoice == manualChoice) {
-                                return _field(bank, 'Bank or issuer');
-                              }
-                              return _formRow(DropdownButtonFormField<String>(
-                                value: bankChoice,
-                                dropdownColor: surface,
-                                borderRadius: BorderRadius.circular(18),
-                                decoration: _sheetFieldDecoration('Bank or issuer'),
-                                validator: (value) => value == null
-                                    ? 'Select bank or pick manual entry'
-                                    : null,
-                                items: [
-                                  ...banks.map(
-                                    (bank) => DropdownMenuItem<String>(
-                                      value: bank,
-                                      child: Text(bank),
+                    child: SilkyScroll(
+                        physics: const BouncingScrollPhysics(),
+                        edgeLockingDelay: Duration.zero,
+                        overScrollingLockingDelay: Duration.zero,
+                        builder: (_, scrollController, scrollPhysics) =>
+                            SingleChildScrollView(
+                              controller: scrollController,
+                              physics: scrollPhysics,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                      'Sensitive details are kept on this device.',
+                                      style: TextStyle(color: muted)),
+                                  const SizedBox(height: 16),
+                                  _cardPreview(
+                                    bank: bank.text,
+                                    name: name.text,
+                                    nickname: existing?.nickname ?? '',
+                                    number: cardNumber.text,
+                                    expiry: expiry.text,
+                                    network: network,
+                                    styleSeed: styleSeed,
+                                    showBack: false,
+                                    cvv: cvv.text,
+                                    artworkPath: artworkPath,
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Wrap(spacing: 8, children: [
+                                    OutlinedButton.icon(
+                                      onPressed: () async {
+                                        final image =
+                                            await ImagePicker().pickImage(
+                                          source: ImageSource.gallery,
+                                          maxWidth: 1600,
+                                          imageQuality: 92,
+                                        );
+                                        if (image == null) return;
+                                        setSheet(() {
+                                          artworkPath = image.path;
+                                          pickedArtworkPath = image.path;
+                                        });
+                                      },
+                                      icon: const HugeIcon(
+                                          icon: HugeIcons.strokeRoundedImage01),
+                                      label: Text(artworkPath == null
+                                          ? 'Choose card image'
+                                          : 'Change image'),
                                     ),
+                                    if (artworkPath != null)
+                                      TextButton(
+                                        onPressed: () => setSheet(() {
+                                          artworkPath = null;
+                                          pickedArtworkPath = null;
+                                        }),
+                                        child:
+                                            const Text('Use generated style'),
+                                      ),
+                                  ]),
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 12),
+                                    child: Text(
+                                        'Card artwork is stored only on this device.',
+                                        style: TextStyle(
+                                            color: muted, fontSize: 12)),
                                   ),
-                                  const DropdownMenuItem<String>(
-                                    value: manualChoice,
-                                    child: Text('Other / enter manually'),
+                                  const SizedBox(height: 20),
+                                  Builder(
+                                    builder: (_) {
+                                      final banks = catalogCards
+                                          .map((entry) => entry.bank)
+                                          .where((bank) => bank.isNotEmpty)
+                                          .toSet()
+                                          .toList()
+                                        ..sort();
+                                      if (banks.isEmpty ||
+                                          bankChoice == manualChoice) {
+                                        return _field(bank, 'Bank or issuer');
+                                      }
+                                      return _formRow(AppDropdown<String>(
+                                        initialItem: bankChoice,
+                                        labelText: 'Bank or issuer',
+                                        validator: (value) => value == null
+                                            ? 'Select bank or pick manual entry'
+                                            : null,
+                                        items: [...banks, manualChoice],
+                                        itemLabel: (value) =>
+                                            value == manualChoice
+                                                ? 'Other / enter manually'
+                                                : value,
+                                        onChanged: (value) => setSheet(() {
+                                          if (value == manualChoice) {
+                                            bankChoice = manualChoice;
+                                            nameChoice = manualChoice;
+                                            selectedEntry = null;
+                                            return;
+                                          }
+                                          bankChoice = value;
+                                          bank.text = value ?? '';
+                                          final names = catalogCards
+                                              .where((entry) =>
+                                                  entry.bank == value)
+                                              .map((entry) => entry.name)
+                                              .where((n) => n.isNotEmpty)
+                                              .toSet()
+                                              .toList()
+                                            ..sort();
+                                          final seedName = name.text.trim();
+                                          if (!names.contains(seedName)) {
+                                            name.text = '';
+                                            nameChoice = null;
+                                            selectedEntry = null;
+                                          } else {
+                                            selectedEntry =
+                                                catalogCards.firstWhere(
+                                              (entry) =>
+                                                  entry.bank == value &&
+                                                  entry.name == seedName,
+                                            );
+                                          }
+                                        }),
+                                      ));
+                                    },
                                   ),
-                                ],
-                                onChanged: (value) => setSheet(() {
-                                  if (value == manualChoice) {
-                                    bankChoice = manualChoice;
-                                    nameChoice = manualChoice;
-                                    selectedEntry = null;
-                                    return;
-                                  }
-                                  bankChoice = value;
-                                  bank.text = value ?? '';
-                                  final names = catalogCards
-                                      .where((entry) => entry.bank == value)
-                                      .map((entry) => entry.name)
-                                      .where((n) => n.isNotEmpty)
-                                      .toSet()
-                                      .toList()
-                                    ..sort();
-                                  final seedName = name.text.trim();
-                                  if (!names.contains(seedName)) {
-                                    name.text = '';
-                                    nameChoice = null;
-                                    selectedEntry = null;
-                                  } else {
-                                    selectedEntry = catalogCards.firstWhere(
-                                      (entry) =>
-                                          entry.bank == value &&
-                                          entry.name == seedName,
-                                    );
-                                  }
-                                }),
-                              ));
-                            },
-                          ),
-                          Builder(
-                            builder: (_) {
-                              final names = catalogCards
-                                  .where((entry) => entry.bank == bankChoice)
-                                  .map((entry) => entry.name)
-                                  .where((n) => n.isNotEmpty)
-                                  .toSet()
-                                  .toList()
-                                ..sort();
-                              if (catalogCards.isEmpty ||
-                                  bankChoice == manualChoice ||
-                                  nameChoice == manualChoice) {
-                                return _field(name, 'Card name and variant');
-                              }
-                              return _formRow(DropdownButtonFormField<String>(
-                                value:
-                                    names.contains(nameChoice) ? nameChoice : null,
-                                dropdownColor: surface,
-                                borderRadius: BorderRadius.circular(18),
-                                decoration: _sheetFieldDecoration(
-                                  'Card name and variant',
-                                  hint: bankChoice == null
-                                      ? 'Pick a bank first'
-                                      : 'Select the card variant',
-                                ),
-                                validator: (value) => value == null
-                                    ? 'Select a variant or pick manual entry'
-                                    : null,
-                                items: [
-                                  ...names.map(
-                                    (name) => DropdownMenuItem<String>(
-                                      value: name,
-                                      child: Text(name),
-                                    ),
+                                  Builder(
+                                    builder: (_) {
+                                      final names = catalogCards
+                                          .where((entry) =>
+                                              entry.bank == bankChoice)
+                                          .map((entry) => entry.name)
+                                          .where((n) => n.isNotEmpty)
+                                          .toSet()
+                                          .toList()
+                                        ..sort();
+                                      if (catalogCards.isEmpty ||
+                                          bankChoice == manualChoice ||
+                                          nameChoice == manualChoice) {
+                                        return _field(
+                                            name, 'Card name and variant');
+                                      }
+                                      return _formRow(AppDropdown<String>(
+                                        key: ValueKey(bankChoice),
+                                        initialItem: names.contains(nameChoice)
+                                            ? nameChoice
+                                            : null,
+                                        labelText: 'Card name and variant',
+                                        hintText: bankChoice == null
+                                            ? 'Pick a bank first'
+                                            : 'Select the card variant',
+                                        validator: (value) => value == null
+                                            ? 'Select a variant or pick manual entry'
+                                            : null,
+                                        items: [...names, manualChoice],
+                                        itemLabel: (value) =>
+                                            value == manualChoice
+                                                ? 'Other / enter manually'
+                                                : value,
+                                        onChanged: bankChoice == null
+                                            ? null
+                                            : (value) => setSheet(() {
+                                                  if (value == manualChoice) {
+                                                    nameChoice = manualChoice;
+                                                    selectedEntry = null;
+                                                    return;
+                                                  }
+                                                  nameChoice = value;
+                                                  name.text = value ?? '';
+                                                  selectedEntry =
+                                                      catalogCards.firstWhere(
+                                                    (entry) =>
+                                                        entry.bank ==
+                                                            bankChoice &&
+                                                        entry.name == value,
+                                                  );
+                                                  if (!networkWasChosen &&
+                                                      selectedEntry != null) {
+                                                    final detected =
+                                                        networkFromCatalog(
+                                                            selectedEntry);
+                                                    if (detected != 'Other') {
+                                                      network = detected;
+                                                      networkWasChosen = true;
+                                                      _trimDigits(cardNumber,
+                                                          _panLength(network));
+                                                      _trimDigits(cvv,
+                                                          _cvvLength(network));
+                                                    }
+                                                  }
+                                                }),
+                                      ));
+                                    },
                                   ),
-                                  const DropdownMenuItem<String>(
-                                    value: manualChoice,
-                                    child: Text('Other / enter manually'),
-                                  ),
-                                ],
-                                onChanged: bankChoice == null
-                                    ? null
-                                    : (value) => setSheet(() {
-                                  if (value == manualChoice) {
-                                    nameChoice = manualChoice;
-                                    selectedEntry = null;
-                                    return;
-                                  }
-                                  nameChoice = value;
-                                  name.text = value ?? '';
-                                  selectedEntry = catalogCards.firstWhere(
-                                    (entry) =>
-                                        entry.bank == bankChoice &&
-                                        entry.name == value,
-                                  );
-                                  if (!networkWasChosen &&
-                                      selectedEntry != null) {
-                                    final detected =
-                                        networkFromCatalog(selectedEntry);
-                                    if (detected != 'Other') {
-                                      network = detected;
+                                  _formRow(AppDropdown<String>(
+                                    key: ValueKey(network),
+                                    initialItem: network,
+                                    labelText: 'Card network',
+                                    items: const [
+                                      'Visa',
+                                      'Mastercard',
+                                      'RuPay',
+                                      'American Express',
+                                      'Diners Club International',
+                                      'Discover',
+                                      'JCB',
+                                      'Other',
+                                    ],
+                                    onChanged: (value) => setSheet(() {
+                                      network = value ?? 'Other';
                                       networkWasChosen = true;
                                       _trimDigits(
                                           cardNumber, _panLength(network));
                                       _trimDigits(cvv, _cvvLength(network));
-                                    }
-                                  }
-                                }),
-                              ));
-                            },
-                          ),
-                          _formRow(DropdownButtonFormField<String>(
-                            value: network,
-                            dropdownColor: surface,
-                            borderRadius: BorderRadius.circular(18),
-                            decoration: _sheetFieldDecoration('Card network'),
-                            items: const [
-                              'Visa',
-                              'Mastercard',
-                              'RuPay',
-                              'American Express',
-                              'Diners Club International',
-                              'Discover',
-                              'JCB',
-                              'Other',
-                            ]
-                                .map((value) => DropdownMenuItem<String>(
-                                      value: value,
-                                      child: Text(value),
-                                    ))
-                                .toList(),
-                            onChanged: (value) => setSheet(() {
-                              network = value ?? 'Other';
-                              networkWasChosen = true;
-                              _trimDigits(cardNumber, _panLength(network));
-                              _trimDigits(cvv, _cvvLength(network));
-                            }),
-                          )),
-                          const SizedBox(height: 12),
-                          FormField<String>(
-                            initialValue: cardNumber.text,
-                            validator: (value) {
-                              final digits =
-                                  value?.replaceAll(RegExp(r'\D'), '') ?? '';
-                              if (digits.isEmpty && existing != null) {
-                                return null;
-                              }
-                              if (existing != null &&
-                                  digits == existing.cardNumber) {
-                                return null;
-                              }
-                              if (!_hasValidPanLength(network, digits.length)) {
-                                return 'Enter ${_panLength(network)} digits';
-                              }
-                              return null;
-                            },
-                            builder: (fieldState) => Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                CardNumberBoxes(
-                                  value: cardNumber.text,
-                                  maxLength: _panLength(network),
-                                  obscure: !revealNumber,
-                                  onChanged: (digits) {
-                                    cardNumber.text = digits;
-                                    fieldState.didChange(digits);
-                                    if (!networkWasChosen) {
-                                      final detected = _networkFromNumber(digits);
-                                      if (detected != network) {
-                                        network = detected;
-                                        _trimDigits(cvv, _cvvLength(network));
+                                    }),
+                                  )),
+                                  const SizedBox(height: 12),
+                                  FormField<String>(
+                                    initialValue: cardNumber.text,
+                                    validator: (value) {
+                                      final digits = value?.replaceAll(
+                                              RegExp(r'\D'), '') ??
+                                          '';
+                                      if (digits.isEmpty && existing != null) {
+                                        return null;
                                       }
-                                    }
-                                    setSheet(() {});
-                                  },
-                                  onToggleVisibility: () => setSheet(
-                                    () => revealNumber = !revealNumber,
-                                  ),
-                                ),
-                                if (fieldState.hasError)
-                                  Padding(
-                                    padding: const EdgeInsets.only(
-                                      top: 6,
-                                      left: 12,
+                                      if (existing != null &&
+                                          digits == existing.cardNumber) {
+                                        return null;
+                                      }
+                                      if (!_hasValidPanLength(
+                                          network, digits.length)) {
+                                        return 'Enter ${_panLength(network)} digits';
+                                      }
+                                      return null;
+                                    },
+                                    builder: (fieldState) => Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        CardNumberBoxes(
+                                          value: cardNumber.text,
+                                          maxLength: _panLength(network),
+                                          obscure: !revealNumber,
+                                          onChanged: (digits) {
+                                            cardNumber.text = digits;
+                                            fieldState.didChange(digits);
+                                            if (!networkWasChosen) {
+                                              final detected =
+                                                  _networkFromNumber(digits);
+                                              if (detected != network) {
+                                                network = detected;
+                                                _trimDigits(
+                                                    cvv, _cvvLength(network));
+                                              }
+                                            }
+                                            setSheet(() {});
+                                          },
+                                          onToggleVisibility: () => setSheet(
+                                            () => revealNumber = !revealNumber,
+                                          ),
+                                        ),
+                                        if (fieldState.hasError)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                              top: 6,
+                                              left: 12,
+                                            ),
+                                            child: Text(
+                                              fieldState.errorText!,
+                                              style: TextStyle(
+                                                color: Theme.of(ctx)
+                                                    .colorScheme
+                                                    .error,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                          ),
+                                      ],
                                     ),
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Row(children: [
+                                    Expanded(
+                                        child: _paymentField(
+                                      expiry,
+                                      'Expiry date',
+                                      hint: 'MM/YY',
+                                      required: existing == null ||
+                                          (existing.expiryDate.isNotEmpty),
+                                      formatters: [
+                                        FilteringTextInputFormatter.allow(
+                                          RegExp(r'[0-9/]'),
+                                        ),
+                                        LengthLimitingTextInputFormatter(5),
+                                      ],
+                                      onChanged: (value) {
+                                        final digits =
+                                            value.replaceAll(RegExp(r'\D'), '');
+                                        final formatted = digits.length > 2
+                                            ? '${digits.substring(0, 2)}/${digits.substring(2, digits.length.clamp(2, 4).toInt())}'
+                                            : digits;
+                                        if (formatted != value) {
+                                          expiry.value = TextEditingValue(
+                                              text: formatted,
+                                              selection:
+                                                  TextSelection.collapsed(
+                                                      offset:
+                                                          formatted.length));
+                                        }
+                                        setSheet(() {});
+                                      },
+                                      validator: (value) {
+                                        if ((value ?? '').isEmpty &&
+                                            existing != null) return null;
+                                        final match = RegExp(
+                                                r'^(0[1-9]|1[0-2])/([0-9]{2})$')
+                                            .firstMatch(value ?? '');
+                                        if (match == null) return 'Use MM/YY';
+                                        final month =
+                                            int.parse(match.group(1)!);
+                                        final year =
+                                            2000 + int.parse(match.group(2)!);
+                                        final now = DateTime.now();
+                                        if (year < now.year ||
+                                            (year == now.year &&
+                                                month < now.month))
+                                          return 'Card has expired';
+                                        return null;
+                                      },
+                                    )),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                        child: _paymentField(
+                                      cvv,
+                                      'CVV',
+                                      hint: '•••',
+                                      obscure: !revealCvv,
+                                      onToggle: () => setSheet(
+                                          () => revealCvv = !revealCvv),
+                                      onChanged: (_) => setSheet(() {}),
+                                      validator: (value) => value != null &&
+                                              value.isNotEmpty &&
+                                              value.length !=
+                                                  _cvvLength(network)
+                                          ? 'Enter ${_cvvLength(network)} digits'
+                                          : null,
+                                      formatters: [
+                                        FilteringTextInputFormatter.digitsOnly,
+                                        LengthLimitingTextInputFormatter(
+                                            _cvvLength(network)),
+                                      ],
+                                    )),
+                                  ]),
+                                  Padding(
+                                    padding: EdgeInsets.only(bottom: 12),
                                     child: Text(
-                                      fieldState.errorText!,
-                                      style: TextStyle(
-                                        color: Theme.of(ctx).colorScheme.error,
-                                        fontSize: 12,
+                                        'Card number, expiry and CVV are encrypted on this device.',
+                                        style: TextStyle(
+                                            color: muted, fontSize: 12)),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  SizedBox(
+                                    width: double.infinity,
+                                    child: FilledButton(
+                                      onPressed: () async {
+                                        if (!form.currentState!.validate())
+                                          return;
+                                        // Form validation marks its inherited scope dirty to
+                                        // paint validation state. Let that frame finish before
+                                        // any save or route teardown begins.
+                                        await WidgetsBinding
+                                            .instance.endOfFrame;
+                                        if (!ctx.mounted) return;
+                                        final digits = cardNumber.text
+                                            .replaceAll(RegExp(r'\D'), '');
+                                        final entry =
+                                            selectedEntry ?? catalogue;
+                                        final card = CreditCard(
+                                          databaseId: existing?.databaseId,
+                                          styleSeed: styleSeed,
+                                          bank: bank.text.trim(),
+                                          name: name.text.trim(),
+                                          network: network,
+                                          nickname: existing?.nickname ?? '',
+                                          annualFee: existing?.annualFee ??
+                                              entry?.annualFee ??
+                                              0,
+                                          cashback: existing?.cashback ??
+                                              entry?.cashbackRate ??
+                                              0,
+                                          rewardRate: existing?.rewardRate ?? 0,
+                                          pointValue: existing?.pointValue ?? 0,
+                                          categories: existing?.categories ??
+                                              entry?.category ??
+                                              '',
+                                          notes: existing?.notes ??
+                                              cardNotes(entry),
+                                          cardNumber: digits,
+                                          expiryDate: expiry.text.trim(),
+                                          cvv: cvv.text.trim(),
+                                          secureDetails:
+                                              existing?.secureDetails ?? '',
+                                          active: existing?.active ?? true,
+                                          rewardsStack:
+                                              existing?.rewardsStack ?? false,
+                                          artworkPath: artworkPath,
+                                        );
+                                        String? copiedArtwork;
+                                        if (pickedArtworkPath != null) {
+                                          final directory = Directory(p.join(
+                                              await getDatabasesPath(),
+                                              'card_art'));
+                                          await directory.create(
+                                              recursive: true);
+                                          final extension = p
+                                              .extension(pickedArtworkPath!)
+                                              .toLowerCase();
+                                          final safeExtension = const {
+                                            '.jpg',
+                                            '.jpeg',
+                                            '.png',
+                                            '.webp'
+                                          }.contains(extension)
+                                              ? extension
+                                              : '.jpg';
+                                          copiedArtwork = p.join(directory.path,
+                                              'art_${DateTime.now().microsecondsSinceEpoch}$safeExtension');
+                                          await File(pickedArtworkPath!)
+                                              .copy(copiedArtwork);
+                                          card.artworkPath = copiedArtwork;
+                                        }
+                                        if (index == null) {
+                                          _resetWalletPage();
+                                          cards.add(card);
+                                        } else {
+                                          cards[index] = card;
+                                        }
+                                        FocusManager.instance.primaryFocus
+                                            ?.unfocus();
+                                        try {
+                                          await _persistCard(card,
+                                              notify: false);
+                                        } catch (error) {
+                                          if (copiedArtwork != null) {
+                                            try {
+                                              await File(copiedArtwork)
+                                                  .delete();
+                                            } catch (_) {}
+                                          }
+                                          if (index == null) {
+                                            cards.remove(card);
+                                          } else if (existing != null) {
+                                            cards[index] = existing;
+                                          }
+                                          if (ctx.mounted) {
+                                            ScaffoldMessenger.of(ctx)
+                                                .showSnackBar(
+                                              SnackBar(
+                                                  content: Text(
+                                                      'Could not save card: $error')),
+                                            );
+                                          }
+                                          return;
+                                        }
+                                        if (existing?.artworkPath != null &&
+                                            existing!.artworkPath !=
+                                                card.artworkPath) {
+                                          try {
+                                            await File(existing.artworkPath!)
+                                                .delete();
+                                          } catch (_) {}
+                                        }
+                                        if (!ctx.mounted) return;
+                                        await WidgetsBinding
+                                            .instance.endOfFrame;
+                                        if (ctx.mounted) Navigator.pop(ctx);
+                                      },
+                                      style: FilledButton.styleFrom(
+                                        backgroundColor: accentColor,
+                                        foregroundColor: isCardyDarkMode
+                                            ? const Color(0xFF111111)
+                                            : Colors.white,
+                                      ),
+                                      child: Text(
+                                        existing == null
+                                            ? 'Save card'
+                                            : 'Save changes',
                                       ),
                                     ),
                                   ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          Row(children: [
-                            Expanded(
-                                child: _paymentField(
-                              expiry,
-                              'Expiry date',
-                              hint: 'MM/YY',
-                              required: existing == null ||
-                                  (existing.expiryDate.isNotEmpty),
-                              formatters: [
-                                FilteringTextInputFormatter.allow(
-                                  RegExp(r'[0-9/]'),
-                                ),
-                                LengthLimitingTextInputFormatter(5),
-                              ],
-                              onChanged: (value) {
-                                final digits =
-                                    value.replaceAll(RegExp(r'\D'), '');
-                                final formatted = digits.length > 2
-                                    ? '${digits.substring(0, 2)}/${digits.substring(2, digits.length.clamp(2, 4).toInt())}'
-                                    : digits;
-                                if (formatted != value) {
-                                  expiry.value = TextEditingValue(
-                                      text: formatted,
-                                      selection: TextSelection.collapsed(
-                                          offset: formatted.length));
-                                }
-                                setSheet(() {});
-                              },
-                              validator: (value) {
-                                if ((value ?? '').isEmpty && existing != null)
-                                  return null;
-                                final match =
-                                    RegExp(r'^(0[1-9]|1[0-2])/([0-9]{2})$')
-                                        .firstMatch(value ?? '');
-                                if (match == null) return 'Use MM/YY';
-                                final month = int.parse(match.group(1)!);
-                                final year = 2000 + int.parse(match.group(2)!);
-                                final now = DateTime.now();
-                                if (year < now.year ||
-                                    (year == now.year && month < now.month))
-                                  return 'Card has expired';
-                                return null;
-                              },
-                            )),
-                            const SizedBox(width: 10),
-                            Expanded(
-                                child: _paymentField(
-                              cvv,
-                              'CVV',
-                              hint: '•••',
-                              obscure: !revealCvv,
-                              onToggle: () =>
-                                  setSheet(() => revealCvv = !revealCvv),
-                              onChanged: (_) => setSheet(() {}),
-                              validator: (value) => value != null &&
-                                      value.isNotEmpty &&
-                                      value.length != _cvvLength(network)
-                                  ? 'Enter ${_cvvLength(network)} digits'
-                                  : null,
-                              formatters: [
-                                FilteringTextInputFormatter.digitsOnly,
-                                LengthLimitingTextInputFormatter(
-                                    _cvvLength(network)),
-                              ],
-                            )),
-                          ]),
-                          Padding(
-                            padding: EdgeInsets.only(bottom: 12),
-                            child: Text(
-                                'Card number and expiry are encrypted on this device. CVV stays in memory for this session and is never saved.',
-                                style: TextStyle(color: muted, fontSize: 12)),
-                          ),
-                          const SizedBox(height: 12),
-                          SizedBox(
-                            width: double.infinity,
-                            child: FilledButton(
-                              onPressed: () async {
-                                if (!form.currentState!.validate()) return;
-                                // Form validation marks its inherited scope dirty to
-                                // paint validation state. Let that frame finish before
-                                // any save or route teardown begins.
-                                await WidgetsBinding.instance.endOfFrame;
-                                if (!ctx.mounted) return;
-                                final digits =
-                                    cardNumber.text.replaceAll(RegExp(r'\D'), '');
-                                final entry =
-                                    selectedEntry ?? catalogue;
-                                final card = CreditCard(
-                                  databaseId: existing?.databaseId,
-                                  styleSeed: styleSeed,
-                                  bank: bank.text.trim(),
-                                  name: name.text.trim(),
-                                  network: network,
-                                  nickname: existing?.nickname ?? '',
-                                  annualFee: existing?.annualFee ??
-                                      entry?.annualFee ??
-                                      0,
-                                  cashback: existing?.cashback ??
-                                      entry?.cashbackRate ??
-                                      0,
-                                  rewardRate: existing?.rewardRate ?? 0,
-                                  pointValue: existing?.pointValue ?? 0,
-                                  categories: existing?.categories ??
-                                      entry?.category ??
-                                      '',
-                                  notes: existing?.notes ?? cardNotes(entry),
-                                  cardNumber: digits,
-                                  expiryDate: expiry.text.trim(),
-                                  cvv: cvv.text.trim(),
-                                  secureDetails: existing?.secureDetails ?? '',
-                                  active: existing?.active ?? true,
-                                  rewardsStack: existing?.rewardsStack ?? false,
-                                  artworkPath: artworkPath,
-                                );
-                                String? copiedArtwork;
-                                if (pickedArtworkPath != null) {
-                                  final directory = Directory(p.join(
-                                      await getDatabasesPath(), 'card_art'));
-                                  await directory.create(recursive: true);
-                                  final extension = p
-                                      .extension(pickedArtworkPath!)
-                                      .toLowerCase();
-                                  final safeExtension = const {
-                                    '.jpg',
-                                    '.jpeg',
-                                    '.png',
-                                    '.webp'
-                                  }.contains(extension)
-                                      ? extension
-                                      : '.jpg';
-                                  copiedArtwork = p.join(directory.path,
-                                      'art_${DateTime.now().microsecondsSinceEpoch}$safeExtension');
-                                  await File(pickedArtworkPath!)
-                                      .copy(copiedArtwork);
-                                  card.artworkPath = copiedArtwork;
-                                }
-                                if (index == null) {
-                                  _resetWalletPage();
-                                  cards.add(card);
-                                } else {
-                                  cards[index] = card;
-                                }
-                                FocusManager.instance.primaryFocus?.unfocus();
-                                try {
-                                  await _persistCard(card, notify: false);
-                                } catch (error) {
-                                  if (copiedArtwork != null) {
-                                    try {
-                                      await File(copiedArtwork).delete();
-                                    } catch (_) {}
-                                  }
-                                  if (index == null) {
-                                    cards.remove(card);
-                                  } else if (existing != null) {
-                                    cards[index] = existing;
-                                  }
-                                  if (ctx.mounted) {
-                                    ScaffoldMessenger.of(ctx).showSnackBar(
-                                      SnackBar(
-                                          content: Text(
-                                              'Could not save card: $error')),
-                                    );
-                                  }
-                                  return;
-                                }
-                                if (existing?.artworkPath != null &&
-                                    existing!.artworkPath != card.artworkPath) {
-                                  try {
-                                    await File(existing.artworkPath!).delete();
-                                  } catch (_) {}
-                                }
-                                if (!ctx.mounted) return;
-                                await WidgetsBinding.instance.endOfFrame;
-                                if (ctx.mounted) Navigator.pop(ctx);
-                              },
-                              style: FilledButton.styleFrom(
-                                backgroundColor: accentColor,
-                                foregroundColor: isCardyDarkMode
-                                    ? const Color(0xFF111111)
-                                    : Colors.white,
+                                ],
                               ),
-                              child: Text(
-                                existing == null ? 'Save card' : 'Save changes',
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+                            )),
                   ),
-              );
-            },
+                );
+              },
             ),
           ),
         );
@@ -2169,7 +3602,8 @@ class _CardyHomeState extends State<CardyHome> {
                       ),
                     ),
                     const SizedBox(width: 10),
-                    _networkWordmark(network, const TextStyle(color: Colors.white)),
+                    _networkWordmark(
+                        network, const TextStyle(color: Colors.white)),
                   ],
                 ),
               ),
@@ -2205,8 +3639,7 @@ class _CardyHomeState extends State<CardyHome> {
         labelText: label,
         hintText: hint,
         labelStyle: TextStyle(color: muted, fontWeight: FontWeight.w500),
-        floatingLabelStyle:
-            TextStyle(color: ink, fontWeight: FontWeight.w600),
+        floatingLabelStyle: TextStyle(color: ink, fontWeight: FontWeight.w600),
         filled: true,
         fillColor: softSurface,
         contentPadding:
@@ -2262,212 +3695,228 @@ class _CardyHomeState extends State<CardyHome> {
       ),
       builder: (ctx) => StatefulBuilder(
           builder: (ctx, setDetails) => SafeArea(
-                child: SingleChildScrollView(
-                  padding: EdgeInsets.fromLTRB(
-                    20,
-                    20,
-                    20,
-                    20 + MediaQuery.of(ctx).viewInsets.bottom,
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Hero(
-                        tag:
-                            'wallet-card-${c.databaseId ?? identityHashCode(c)}',
-                        child: _cardPreview(
-                          bank: c.bank,
-                          name: c.name,
-                          nickname: c.nickname,
-                          number: c.cardNumber,
-                          expiry: c.expiryDate,
-                          network: c.network,
-                          styleSeed: c.styleSeed,
-                          showBack: showBack,
-                          cvv: c.cvv,
-                          artworkPath: c.artworkPath,
-                        ),
-                      ),
-                      Row(
-                        children: [
-                          IconButton(
-                            tooltip: c.favorite
-                                ? 'Remove from favorites'
-                                : 'Add to favorites',
-                            onPressed: () async {
-                              await _setFavorite(c, !c.favorite);
-                              setDetails(() {});
-                            },
-                            icon: HugeIcon(
-                              icon: HugeIcons.strokeRoundedFavourite,
-                              color: c.favorite ? Colors.redAccent : muted,
-                            ),
+                child: SilkyScroll(
+                    physics: const BouncingScrollPhysics(),
+                    edgeLockingDelay: Duration.zero,
+                    overScrollingLockingDelay: Duration.zero,
+                    builder: (_, scrollController, scrollPhysics) =>
+                        SingleChildScrollView(
+                          controller: scrollController,
+                          physics: scrollPhysics,
+                          padding: EdgeInsets.fromLTRB(
+                            20,
+                            20,
+                            20,
+                            20 + MediaQuery.of(ctx).viewInsets.bottom,
                           ),
-                          const Spacer(),
-                          TextButton.icon(
-                            onPressed: () =>
-                                setDetails(() => showBack = !showBack),
-                            icon: HugeIcon(
-                                icon: showBack
-                                    ? HugeIcons.strokeRoundedCreditCard
-                                    : HugeIcons.strokeRoundedFlipHorizontal),
-                            label: Text(showBack ? 'Show front' : 'Show back'),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14),
-                        decoration: BoxDecoration(
-                          color: surface,
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        child: Column(
-                          children: [
-                            _detailItem('Bank / issuer', c.bank),
-                            const Divider(height: 1),
-                            _detailItem('Variant', c.name),
-                            const Divider(height: 1),
-                            _detailItem('Network', c.network),
-                            const Divider(height: 1),
-                            _detailItem(
-                              'Card number',
-                              digits.isEmpty
-                                  ? 'Not entered'
-                                  : revealNumber
-                                      ? digits
-                                          .replaceAllMapped(
-                                            RegExp(r'.{4}'),
-                                            (m) => '${m.group(0)} ',
-                                          )
-                                          .trim()
-                                      : '•••• •••• •••• $lastFour',
-                              trailing: digits.isEmpty
-                                  ? null
-                                  : Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        IconButton(
-                                          tooltip: revealNumber
-                                              ? 'Hide card number'
-                                              : 'Show card number',
-                                          onPressed: () async {
-                                            if (revealNumber) {
-                                              setDetails(
-                                                  () => revealNumber = false);
-                                            } else if (await _authenticateSensitiveData() &&
-                                                ctx.mounted) {
-                                              setDetails(
-                                                  () => revealNumber = true);
-                                            }
-                                          },
-                                          icon: HugeIcon(
-                                              icon: revealNumber
-                                                  ? HugeIcons
-                                                      .strokeRoundedEyeOff
-                                                  : HugeIcons.strokeRoundedEye),
-                                        ),
-                                        IconButton(
-                                          tooltip: 'Copy card number',
-                                          onPressed: () async {
-                                            if (await _authenticateSensitiveData()) {
-                                              await _copyCardDetail(
-                                                  digits, 'Card number');
-                                            }
-                                          },
-                                          icon: const HugeIcon(
-                                              icon:
-                                                  HugeIcons.strokeRoundedCopy),
-                                        ),
-                                      ],
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Hero(
+                                tag:
+                                    'wallet-card-${c.databaseId ?? identityHashCode(c)}',
+                                child: _cardPreview(
+                                  bank: c.bank,
+                                  name: c.name,
+                                  nickname: c.nickname,
+                                  number: c.cardNumber,
+                                  expiry: c.expiryDate,
+                                  network: c.network,
+                                  styleSeed: c.styleSeed,
+                                  showBack: showBack,
+                                  cvv: c.cvv,
+                                  artworkPath: c.artworkPath,
+                                ),
+                              ),
+                              Row(
+                                children: [
+                                  IconButton(
+                                    tooltip: c.favorite
+                                        ? 'Remove from favorites'
+                                        : 'Add to favorites',
+                                    onPressed: () async {
+                                      await _setFavorite(c, !c.favorite);
+                                      setDetails(() {});
+                                    },
+                                    icon: HugeIcon(
+                                      icon: HugeIcons.strokeRoundedFavourite,
+                                      color:
+                                          c.favorite ? Colors.redAccent : muted,
                                     ),
-                            ),
-                            const Divider(height: 1),
-                            _detailItem(
-                              'Expiry',
-                              c.expiryDate.isEmpty
-                                  ? 'Not entered'
-                                  : c.expiryDate,
-                              trailing: c.expiryDate.isEmpty
-                                  ? null
-                                  : IconButton(
-                                      tooltip: 'Copy expiry date',
-                                      onPressed: () => _copyCardDetail(
-                                          c.expiryDate, 'Expiry date'),
-                                      icon: const HugeIcon(
-                                          icon: HugeIcons.strokeRoundedCopy),
+                                  ),
+                                  const Spacer(),
+                                  TextButton.icon(
+                                    onPressed: () =>
+                                        setDetails(() => showBack = !showBack),
+                                    icon: HugeIcon(
+                                        icon: showBack
+                                            ? HugeIcons.strokeRoundedCreditCard
+                                            : HugeIcons
+                                                .strokeRoundedFlipHorizontal),
+                                    label: Text(
+                                        showBack ? 'Show front' : 'Show back'),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 16),
+                              Container(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 14),
+                                decoration: BoxDecoration(
+                                  color: surface,
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                                child: Column(
+                                  children: [
+                                    _detailItem('Bank / issuer', c.bank),
+                                    const Divider(height: 1),
+                                    _detailItem('Variant', c.name),
+                                    const Divider(height: 1),
+                                    _detailItem('Network', c.network),
+                                    const Divider(height: 1),
+                                    _detailItem(
+                                      'Card number',
+                                      digits.isEmpty
+                                          ? 'Not entered'
+                                          : revealNumber
+                                              ? digits
+                                                  .replaceAllMapped(
+                                                    RegExp(r'.{4}'),
+                                                    (m) => '${m.group(0)} ',
+                                                  )
+                                                  .trim()
+                                              : '•••• •••• •••• $lastFour',
+                                      trailing: digits.isEmpty
+                                          ? null
+                                          : Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                IconButton(
+                                                  tooltip: revealNumber
+                                                      ? 'Hide card number'
+                                                      : 'Show card number',
+                                                  onPressed: () async {
+                                                    if (revealNumber) {
+                                                      setDetails(() =>
+                                                          revealNumber = false);
+                                                    } else if (await _authenticateSensitiveData() &&
+                                                        ctx.mounted) {
+                                                      setDetails(() =>
+                                                          revealNumber = true);
+                                                    }
+                                                  },
+                                                  icon: HugeIcon(
+                                                      icon: revealNumber
+                                                          ? HugeIcons
+                                                              .strokeRoundedEyeOff
+                                                          : HugeIcons
+                                                              .strokeRoundedEye),
+                                                ),
+                                                IconButton(
+                                                  tooltip: 'Copy card number',
+                                                  onPressed: () async {
+                                                    if (await _authenticateSensitiveData()) {
+                                                      await _copyCardDetail(
+                                                          digits,
+                                                          'Card number');
+                                                    }
+                                                  },
+                                                  icon: const HugeIcon(
+                                                      icon: HugeIcons
+                                                          .strokeRoundedCopy),
+                                                ),
+                                              ],
+                                            ),
                                     ),
-                            ),
-                            const Divider(height: 1),
-                            _detailItem(
-                              'CVV',
-                              c.cvv.isEmpty
-                                  ? 'Not entered'
-                                  : revealCvv
-                                      ? c.cvv
-                                      : '•••',
-                              trailing: c.cvv.isEmpty
-                                  ? null
-                                  : Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        IconButton(
-                                          tooltip: revealCvv
-                                              ? 'Hide CVV'
-                                              : 'Show CVV',
-                                          onPressed: () async {
-                                            if (revealCvv) {
-                                              setDetails(
-                                                  () => revealCvv = false);
-                                            } else if (await _authenticateSensitiveData() &&
-                                                ctx.mounted) {
-                                              setDetails(
-                                                  () => revealCvv = true);
-                                            }
-                                          },
-                                          icon: HugeIcon(
-                                              icon: revealCvv
-                                                  ? HugeIcons
-                                                      .strokeRoundedEyeOff
-                                                  : HugeIcons.strokeRoundedEye),
-                                        ),
-                                      ],
+                                    const Divider(height: 1),
+                                    _detailItem(
+                                      'Expiry',
+                                      c.expiryDate.isEmpty
+                                          ? 'Not entered'
+                                          : c.expiryDate,
+                                      trailing: c.expiryDate.isEmpty
+                                          ? null
+                                          : IconButton(
+                                              tooltip: 'Copy expiry date',
+                                              onPressed: () => _copyCardDetail(
+                                                  c.expiryDate, 'Expiry date'),
+                                              icon: const HugeIcon(
+                                                  icon: HugeIcons
+                                                      .strokeRoundedCopy),
+                                            ),
                                     ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 14),
-                      Wrap(
-                        spacing: 8,
-                        children: [
-                          OutlinedButton(
-                            onPressed: () {
-                              Navigator.pop(ctx);
-                              _editCard(existing: c, index: i);
-                            },
-                            child: const Text('Edit'),
+                                    const Divider(height: 1),
+                                    _detailItem(
+                                      'CVV',
+                                      c.cvv.isEmpty
+                                          ? 'Not entered'
+                                          : revealCvv
+                                              ? c.cvv
+                                              : '•••',
+                                      trailing: c.cvv.isEmpty
+                                          ? null
+                                          : Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                IconButton(
+                                                  tooltip: revealCvv
+                                                      ? 'Hide CVV'
+                                                      : 'Show CVV',
+                                                  onPressed: () async {
+                                                    if (revealCvv) {
+                                                      setDetails(() =>
+                                                          revealCvv = false);
+                                                    } else if (await _authenticateSensitiveData() &&
+                                                        ctx.mounted) {
+                                                      setDetails(() =>
+                                                          revealCvv = true);
+                                                    }
+                                                  },
+                                                  icon: HugeIcon(
+                                                      icon: revealCvv
+                                                          ? HugeIcons
+                                                              .strokeRoundedEyeOff
+                                                          : HugeIcons
+                                                              .strokeRoundedEye),
+                                                ),
+                                              ],
+                                            ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                              Wrap(
+                                spacing: 8,
+                                children: [
+                                  OutlinedButton(
+                                    onPressed: () {
+                                      Navigator.pop(ctx);
+                                      _editCard(existing: c, index: i);
+                                    },
+                                    child: const Text('Edit'),
+                                  ),
+                                  OutlinedButton(
+                                    onPressed: () async {
+                                      Navigator.pop(ctx);
+                                      await _setActive(c, !c.active);
+                                    },
+                                    child: Text(
+                                        c.active ? 'Deactivate' : 'Reactivate'),
+                                  ),
+                                  TextButton(
+                                    onPressed: () => _confirmDelete(c, ctx),
+                                    child: const Text(
+                                      'Delete',
+                                      style: TextStyle(color: Colors.redAccent),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
                           ),
-                          OutlinedButton(
-                            onPressed: () async {
-                              Navigator.pop(ctx);
-                              await _setActive(c, !c.active);
-                            },
-                            child: Text(c.active ? 'Deactivate' : 'Reactivate'),
-                          ),
-                          TextButton(
-                            onPressed: () => _confirmDelete(c, ctx),
-                            child: const Text(
-                              'Delete',
-                              style: TextStyle(color: Colors.redAccent),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
+                        )),
               )),
     );
   }
@@ -2675,22 +4124,43 @@ class _CardyHomeState extends State<CardyHome> {
         reverseDuration: Duration(milliseconds: 260),
       ),
       builder: (sheetContext) => SafeArea(
-        child: ValueListenableBuilder<bool>(
-          valueListenable: cardyDarkMode,
-          builder: (context, darkMode, child) => SwitchListTile(
-            title: const Text('Dark mode'),
-            subtitle: const Text('Use a darker theme throughout Cardy.'),
-            secondary: HugeIcon(
-                icon: darkMode
-                    ? HugeIcons.strokeRoundedMoon01
-                    : HugeIcons.strokeRoundedSun01),
-            value: darkMode,
-            onChanged: (value) async {
-              cardyDarkMode.value = value;
-              final preferences = await SharedPreferences.getInstance();
-              await preferences.setBool('dark_mode', value);
-            },
-          ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ValueListenableBuilder<bool>(
+              valueListenable: cardyDarkMode,
+              builder: (context, darkMode, child) => SwitchListTile(
+                title: const Text('Dark mode'),
+                subtitle: const Text('Use a darker theme throughout Cardy.'),
+                secondary: HugeIcon(
+                    icon: darkMode
+                        ? HugeIcons.strokeRoundedMoon01
+                        : HugeIcons.strokeRoundedSun01),
+                value: darkMode,
+                onChanged: (value) async {
+                  cardyDarkMode.value = value;
+                  final preferences = await SharedPreferences.getInstance();
+                  await preferences.setBool('dark_mode', value);
+                },
+              ),
+            ),
+            ValueListenableBuilder<bool>(
+              valueListenable: biometricLockEnabled,
+              builder: (context, enabled, child) => SwitchListTile(
+                title: const Text('Biometric lock'),
+                subtitle: const Text(
+                    'Require fingerprint, face or screen lock to open Cardy.'),
+                secondary:
+                    const HugeIcon(icon: HugeIcons.strokeRoundedFingerPrint),
+                value: enabled,
+                onChanged: (value) async {
+                  biometricLockEnabled.value = value;
+                  final preferences = await SharedPreferences.getInstance();
+                  await preferences.setBool('biometric_lock', value);
+                },
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -2722,14 +4192,18 @@ class _WalletPocketPainter extends CustomPainter {
     final w = size.width;
     final h = size.height;
     final path = Path()
-      ..moveTo(0, hump)
+      ..moveTo(0, hump + 26)
+      ..quadraticBezierTo(0, hump, 26, hump)
       ..lineTo(w * .09, hump)
       ..cubicTo(w * .15, hump, w * .16, 0, w * .22, 0)
       ..lineTo(w * .78, 0)
       ..cubicTo(w * .84, 0, w * .85, hump, w * .91, hump)
-      ..lineTo(w, hump)
-      ..lineTo(w, h)
-      ..lineTo(0, h)
+      ..lineTo(w - 26, hump)
+      ..quadraticBezierTo(w, hump, w, hump + 26)
+      ..lineTo(w, h - 26)
+      ..quadraticBezierTo(w, h, w - 26, h)
+      ..lineTo(26, h)
+      ..quadraticBezierTo(0, h, 0, h - 26)
       ..close();
     canvas.drawShadow(path, Colors.black.withValues(alpha: .4), 8, false);
     canvas.drawPath(path, Paint()..color = color);

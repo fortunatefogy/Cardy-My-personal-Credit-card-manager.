@@ -1,3 +1,4 @@
+import 'package:silky_scroll/silky_scroll.dart';
 import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -121,23 +122,32 @@ class _CardCataloguePageState extends State<CardCataloguePage> {
                       const SizedBox(height: 8),
                       SizedBox(
                         height: 42,
-                        child: ListView(
-                          scrollDirection: Axis.horizontal,
-                          children: [
-                            'All banks',
-                            ...banks,
-                          ]
-                              .map((bank) => Padding(
-                                    padding: const EdgeInsets.only(right: 8),
-                                    child: ChoiceChip(
-                                      label: Text(bank),
-                                      selected: _bank == bank,
-                                      onSelected: (_) =>
-                                          setState(() => _bank = bank),
-                                    ),
-                                  ))
-                              .toList(),
-                        ),
+                        child: SilkyScroll(
+                            direction: Axis.horizontal,
+                            physics: const BouncingScrollPhysics(),
+                            edgeLockingDelay: Duration.zero,
+                            overScrollingLockingDelay: Duration.zero,
+                            builder: (_, scrollController, scrollPhysics) =>
+                                ListView(
+                                  controller: scrollController,
+                                  physics: scrollPhysics,
+                                  scrollDirection: Axis.horizontal,
+                                  children: [
+                                    'All banks',
+                                    ...banks,
+                                  ]
+                                      .map((bank) => Padding(
+                                            padding:
+                                                const EdgeInsets.only(right: 8),
+                                            child: ChoiceChip(
+                                              label: Text(bank),
+                                              selected: _bank == bank,
+                                              onSelected: (_) =>
+                                                  setState(() => _bank = bank),
+                                            ),
+                                          ))
+                                      .toList(),
+                                )),
                       ),
                       Align(
                         alignment: Alignment.centerLeft,
@@ -169,57 +179,68 @@ class _CardCataloguePageState extends State<CardCataloguePage> {
                                   ? 'No catalogue cached yet.'
                                   : 'No matching cards.',
                               style: TextStyle(color: muted)))
-                      : ListView.separated(
-                          padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-                          itemCount: visible.length,
-                          separatorBuilder: (_, __) =>
-                              const SizedBox(height: 9),
-                          itemBuilder: (context, index) {
-                            final card = visible[index];
-                            final fee = card.annualFee;
-                            return Card(
-                              child: ListTile(
-                                leading: CircleAvatar(
-                                    backgroundColor: surface,
-                                    child: HugeIcon(
-                                        icon: HugeIcons.strokeRoundedCreditCard,
-                                        color: accentColor)),
-                                title: Text(card.name,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis),
-                                subtitle: Text(
-                                    '${card.displayBank}'
-                                    '${card.category.isEmpty ? '' : ' · ${card.category}'}'
-                                    '${fee == null || fee <= 0 ? '' : ' · ₹${fee.toStringAsFixed(0)} fee'}',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(color: muted)),
-                                trailing: card.cardTrailScore == null
-                                    ? const HugeIcon(
-                                        icon:
-                                            HugeIcons.strokeRoundedArrowRight01)
-                                    : Text(
-                                        card.cardTrailScore!.toStringAsFixed(1),
-                                        style: TextStyle(
-                                            color: isCardyDarkMode
-                                                ? const Color(0xFF7DE0A1)
-                                                : const Color(0xFF0B7A45),
-                                            fontWeight: FontWeight.w700)),
-                                onTap: () async {
-                                  final selected = await Navigator.of(context)
-                                      .push<CardCatalogEntry>(
-                                    cardyPageRoute(
-                                      (_) =>
-                                          _CardCatalogueDetailPage(entry: card),
+                      : SilkyScroll(
+                          physics: const BouncingScrollPhysics(),
+                          edgeLockingDelay: Duration.zero,
+                          overScrollingLockingDelay: Duration.zero,
+                          builder: (_, scrollController, scrollPhysics) =>
+                              ListView.separated(
+                                controller: scrollController,
+                                physics: scrollPhysics,
+                                padding:
+                                    const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                                itemCount: visible.length,
+                                separatorBuilder: (_, __) =>
+                                    const SizedBox(height: 9),
+                                itemBuilder: (context, index) {
+                                  final card = visible[index];
+                                  final fee = card.annualFee;
+                                  return Card(
+                                    child: ListTile(
+                                      leading: CircleAvatar(
+                                          backgroundColor: surface,
+                                          child: HugeIcon(
+                                              icon: HugeIcons
+                                                  .strokeRoundedCreditCard,
+                                              color: accentColor)),
+                                      title: Text(card.name,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis),
+                                      subtitle: Text(
+                                          '${card.displayBank}'
+                                          '${card.category.isEmpty ? '' : ' · ${card.category}'}'
+                                          '${fee == null || fee <= 0 ? '' : ' · ₹${fee.toStringAsFixed(0)} fee'}',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(color: muted)),
+                                      trailing: card.cardTrailScore == null
+                                          ? const HugeIcon(
+                                              icon: HugeIcons
+                                                  .strokeRoundedArrowRight01)
+                                          : Text(
+                                              card.cardTrailScore!
+                                                  .toStringAsFixed(1),
+                                              style: TextStyle(
+                                                  color: isCardyDarkMode
+                                                      ? const Color(0xFF7DE0A1)
+                                                      : const Color(0xFF0B7A45),
+                                                  fontWeight: FontWeight.w700)),
+                                      onTap: () async {
+                                        final selected =
+                                            await Navigator.of(context)
+                                                .push<CardCatalogEntry>(
+                                          cardyPageRoute(
+                                            (_) => _CardCatalogueDetailPage(
+                                                entry: card),
+                                          ),
+                                        );
+                                        if (selected != null && context.mounted)
+                                          Navigator.pop(context, selected);
+                                      },
                                     ),
                                   );
-                                  if (selected != null && context.mounted)
-                                    Navigator.pop(context, selected);
                                 },
-                              ),
-                            );
-                          },
-                        ),
+                              )),
                 ),
               ],
             ),
@@ -281,75 +302,84 @@ class _CardCatalogueDetailPageState extends State<_CardCatalogueDetailPage> {
         ),
         body: _loading
             ? Center(child: CircularProgressIndicator(color: accentColor))
-            : ListView(
-                padding: const EdgeInsets.fromLTRB(18, 12, 18, 28),
-                children: [
-                  Text(_entry.name,
-                      style: const TextStyle(
-                          fontSize: 25, fontWeight: FontWeight.w800)),
-                  const SizedBox(height: 5),
-                  Text(
-                      '${_entry.displayBank}${_entry.category.isEmpty ? '' : ' · ${_entry.category}'}',
-                      style: TextStyle(color: muted)),
-                  const SizedBox(height: 14),
-                  if (_entry.imageUrl != null) ...[
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(16),
-                      child: Image.network(
-                        _entry.imageUrl!,
-                        height: 170,
-                        width: double.infinity,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: Text('Card artwork provided by CardTrail',
-                          style: TextStyle(color: muted, fontSize: 11)),
-                    ),
-                    const SizedBox(height: 12),
-                  ],
-                  if (_error != null)
-                    _notice(
-                        'Could not refresh details. ${_entry.details.isEmpty ? _error : 'Showing cached details.'}'),
-                  if (_entry.summary.isNotEmpty)
-                    _section('About this card', _entry.summary),
-                  if (_entry.details.isNotEmpty) ...[
-                    const Text('Card details',
-                        style: TextStyle(
-                            fontSize: 18, fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 8),
-                    ..._entry.details.entries
-                        .map((item) => _detailRow(item.key, item.value)),
-                  ] else
-                    _notice(
-                        'No detailed data was available in the page. You can still add the card and edit its details.'),
-                  const SizedBox(height: 16),
-                  _notice('Card details are sourced from CardTrail'
-                      '${_entry.detailsCheckedAt == null ? '' : ' · last checked ${_entry.detailsCheckedAt!.day}/${_entry.detailsCheckedAt!.month}/${_entry.detailsCheckedAt!.year}'}'
-                      ' and may differ from current issuer terms. Confirm fees and benefits with the issuer before relying on them.'),
-                  const SizedBox(height: 12),
-                  OutlinedButton.icon(
-                    onPressed: () => launchUrl(Uri.parse(_entry.detailUrl),
-                        mode: LaunchMode.externalApplication),
-                    icon: const HugeIcon(
-                        icon: HugeIcons.strokeRoundedArrowUpRight01),
-                    label: const Text('Open CardTrail source'),
-                  ),
-                  const SizedBox(height: 8),
-                  FilledButton.icon(
-                    onPressed: () => Navigator.pop(context, _entry),
-                    style: FilledButton.styleFrom(
-                        backgroundColor: accentColor,
-                        foregroundColor: isCardyDarkMode
-                            ? const Color(0xFF171719)
-                            : Colors.white),
-                    icon: const HugeIcon(icon: HugeIcons.strokeRoundedAdd01),
-                    label: const Text('Add to my cards'),
-                  ),
-                ],
-              ),
+            : SilkyScroll(
+                physics: const BouncingScrollPhysics(),
+                edgeLockingDelay: Duration.zero,
+                overScrollingLockingDelay: Duration.zero,
+                builder: (_, scrollController, scrollPhysics) => ListView(
+                      controller: scrollController,
+                      physics: scrollPhysics,
+                      padding: const EdgeInsets.fromLTRB(18, 12, 18, 28),
+                      children: [
+                        Text(_entry.name,
+                            style: const TextStyle(
+                                fontSize: 25, fontWeight: FontWeight.w800)),
+                        const SizedBox(height: 5),
+                        Text(
+                            '${_entry.displayBank}${_entry.category.isEmpty ? '' : ' · ${_entry.category}'}',
+                            style: TextStyle(color: muted)),
+                        const SizedBox(height: 14),
+                        if (_entry.imageUrl != null) ...[
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(16),
+                            child: Image.network(
+                              _entry.imageUrl!,
+                              height: 170,
+                              width: double.infinity,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, __, ___) =>
+                                  const SizedBox.shrink(),
+                            ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text('Card artwork provided by CardTrail',
+                                style: TextStyle(color: muted, fontSize: 11)),
+                          ),
+                          const SizedBox(height: 12),
+                        ],
+                        if (_error != null)
+                          _notice(
+                              'Could not refresh details. ${_entry.details.isEmpty ? _error : 'Showing cached details.'}'),
+                        if (_entry.summary.isNotEmpty)
+                          _section('About this card', _entry.summary),
+                        if (_entry.details.isNotEmpty) ...[
+                          const Text('Card details',
+                              style: TextStyle(
+                                  fontSize: 18, fontWeight: FontWeight.w700)),
+                          const SizedBox(height: 8),
+                          ..._entry.details.entries
+                              .map((item) => _detailRow(item.key, item.value)),
+                        ] else
+                          _notice(
+                              'No detailed data was available in the page. You can still add the card and edit its details.'),
+                        const SizedBox(height: 16),
+                        _notice('Card details are sourced from CardTrail'
+                            '${_entry.detailsCheckedAt == null ? '' : ' · last checked ${_entry.detailsCheckedAt!.day}/${_entry.detailsCheckedAt!.month}/${_entry.detailsCheckedAt!.year}'}'
+                            ' and may differ from current issuer terms. Confirm fees and benefits with the issuer before relying on them.'),
+                        const SizedBox(height: 12),
+                        OutlinedButton.icon(
+                          onPressed: () => launchUrl(
+                              Uri.parse(_entry.detailUrl),
+                              mode: LaunchMode.externalApplication),
+                          icon: const HugeIcon(
+                              icon: HugeIcons.strokeRoundedArrowUpRight01),
+                          label: const Text('Open CardTrail source'),
+                        ),
+                        const SizedBox(height: 8),
+                        FilledButton.icon(
+                          onPressed: () => Navigator.pop(context, _entry),
+                          style: FilledButton.styleFrom(
+                              backgroundColor: accentColor,
+                              foregroundColor: isCardyDarkMode
+                                  ? const Color(0xFF171719)
+                                  : Colors.white),
+                          icon: const HugeIcon(
+                              icon: HugeIcons.strokeRoundedAdd01),
+                          label: const Text('Add to my cards'),
+                        ),
+                      ],
+                    )),
       );
 
   Widget _section(String title, String text) => Padding(

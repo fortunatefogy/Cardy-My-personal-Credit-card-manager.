@@ -1,3 +1,4 @@
+import 'package:silky_scroll/silky_scroll.dart';
 import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -242,56 +243,66 @@ class _AiChatPageState extends State<AiChatPage> {
               )),
         ),
       Expanded(
-          child: ListView.builder(
-        controller: _scroll,
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-        itemCount: _messages.length + (_sending ? 1 : 0),
-        itemBuilder: (context, index) {
-          if (_sending && index == _messages.length) {
-            return Align(
-                alignment: Alignment.centerLeft,
-                child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: colors.primary))));
-          }
-          final message = _messages[index];
-          final isUser = message.role == 'user';
-          return Align(
-            alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-            child: Container(
-              constraints: BoxConstraints(
-                  maxWidth: MediaQuery.sizeOf(context).width * .82),
-              margin: const EdgeInsets.only(bottom: 12),
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: isUser
-                    ? colors.primary.withValues(alpha: .2)
-                    : colors.surface,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(
-                    color: isUser
-                        ? colors.primary.withValues(alpha: .3)
-                        : colors.outlineVariant),
-                boxShadow: isUser
-                    ? null
-                    : [
-                        BoxShadow(
-                          color: colors.primary.withValues(alpha: .07),
-                          blurRadius: 14,
-                          offset: const Offset(0, 4),
+          child: SilkyScroll(
+              controller: _scroll,
+              physics: const BouncingScrollPhysics(),
+              edgeLockingDelay: Duration.zero,
+              overScrollingLockingDelay: Duration.zero,
+              builder: (_, scrollController, scrollPhysics) => ListView.builder(
+                    controller: scrollController,
+                    physics: scrollPhysics,
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+                    itemCount: _messages.length + (_sending ? 1 : 0),
+                    itemBuilder: (context, index) {
+                      if (_sending && index == _messages.length) {
+                        return Align(
+                            alignment: Alignment.centerLeft,
+                            child: Padding(
+                                padding: const EdgeInsets.all(12),
+                                child: SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: colors.primary))));
+                      }
+                      final message = _messages[index];
+                      final isUser = message.role == 'user';
+                      return Align(
+                        alignment: isUser
+                            ? Alignment.centerRight
+                            : Alignment.centerLeft,
+                        child: Container(
+                          constraints: BoxConstraints(
+                              maxWidth: MediaQuery.sizeOf(context).width * .82),
+                          margin: const EdgeInsets.only(bottom: 12),
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: isUser
+                                ? colors.primary.withValues(alpha: .2)
+                                : colors.surface,
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                                color: isUser
+                                    ? colors.primary.withValues(alpha: .3)
+                                    : colors.outlineVariant),
+                            boxShadow: isUser
+                                ? null
+                                : [
+                                    BoxShadow(
+                                      color:
+                                          colors.primary.withValues(alpha: .07),
+                                      blurRadius: 14,
+                                      offset: const Offset(0, 4),
+                                    ),
+                                  ],
+                          ),
+                          child: SelectableText(message.text,
+                              style: const TextStyle(height: 1.4)),
                         ),
-                      ],
-              ),
-              child: SelectableText(message.text,
-                  style: const TextStyle(height: 1.4)),
-            ),
-          );
-        },
-      )),
+                      );
+                    },
+                  ))),
       Padding(
         padding: EdgeInsets.fromLTRB(
             12, 8, 12, MediaQuery.viewInsetsOf(context).bottom + 12),

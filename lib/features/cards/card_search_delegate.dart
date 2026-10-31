@@ -1,3 +1,4 @@
+import 'package:silky_scroll/silky_scroll.dart';
 import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 
@@ -32,20 +33,27 @@ class CardSearchDelegate extends SearchDelegate<CreditCard?> {
               .contains(q),
         )
         .toList();
-    return ListView(
-      children: matches
-          .map(
-            (x) => ListTile(
-              leading: HugeIcon(
-                  icon: HugeIcons.strokeRoundedCreditCard, color: accentColor),
-              title: Text(x.nickname.isEmpty ? x.name : x.nickname),
-              subtitle: Text('${x.bank} · ${x.categories}'),
-              onTap: () {
-                close(c, x);
-              },
-            ),
-          )
-          .toList(),
-    );
+    return SilkyScroll(
+        physics: const BouncingScrollPhysics(),
+        edgeLockingDelay: Duration.zero,
+        overScrollingLockingDelay: Duration.zero,
+        builder: (_, scrollController, scrollPhysics) => ListView(
+              controller: scrollController,
+              physics: scrollPhysics,
+              children: matches
+                  .map(
+                    (x) => ListTile(
+                      leading: HugeIcon(
+                          icon: HugeIcons.strokeRoundedCreditCard,
+                          color: accentColor),
+                      title: Text(x.nickname.isEmpty ? x.name : x.nickname),
+                      subtitle: Text('${x.bank} · ${x.categories}'),
+                      onTap: () {
+                        close(c, x);
+                      },
+                    ),
+                  )
+                  .toList(),
+            ));
   }
 }

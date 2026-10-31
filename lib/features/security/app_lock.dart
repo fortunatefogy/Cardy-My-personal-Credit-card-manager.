@@ -1,3 +1,4 @@
+import 'package:silky_scroll/silky_scroll.dart';
 import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:local_auth/local_auth.dart';
@@ -29,6 +30,11 @@ class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    if (!biometricLockEnabled.value) {
+      _locked = false;
+      _checkingAvailability = false;
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => _unlockWithAuth());
   }
 
@@ -52,7 +58,13 @@ class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
   }
 
   void _lockInBackground() {
-    if (!mounted || _locked || _authenticating || !_deviceSupportsLock) return;
+    if (!mounted ||
+        _locked ||
+        _authenticating ||
+        !_deviceSupportsLock ||
+        !biometricLockEnabled.value) {
+      return;
+    }
     final justUnlocked = _unlockedAt != null &&
         DateTime.now().difference(_unlockedAt!) < const Duration(seconds: 2);
     if (justUnlocked) return;
@@ -137,81 +149,93 @@ class _LockScreen extends StatelessWidget {
       color: appBackground,
       child: SafeArea(
         child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(28),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 340),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 84,
-                    height: 84,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: softSurface,
-                      border: Border.all(color: panelBorder),
-                    ),
-                    alignment: Alignment.center,
-                    child: HugeIcon(
-                      icon: HugeIcons.strokeRoundedLock,
-                      size: 34,
-                      color: brandAccentDeep,
-                    ),
-                  ),
-                  const SizedBox(height: 22),
-                  Text(
-                    'Cardy is locked',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.w700,
-                      color: ink,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Authenticate with your fingerprint, face or screen lock to view your saved cards.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: muted, height: 1.4),
-                  ),
-                  if (error != null) ...[
-                    const SizedBox(height: 14),
-                    Text(
-                      error!,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: colors.error, fontSize: 12),
-                    ),
-                  ],
-                  const SizedBox(height: 24),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 50,
-                    child: FilledButton.icon(
-                      onPressed: authenticating || checking ? null : onUnlock,
-                      style: FilledButton.styleFrom(
-                        backgroundColor: accentColor,
-                        foregroundColor: isCardyDarkMode
-                            ? const Color(0xFF111111)
-                            : Colors.white,
+          child: SilkyScroll(
+              physics: const BouncingScrollPhysics(),
+              edgeLockingDelay: Duration.zero,
+              overScrollingLockingDelay: Duration.zero,
+              builder: (_, scrollController, scrollPhysics) =>
+                  SingleChildScrollView(
+                    controller: scrollController,
+                    physics: scrollPhysics,
+                    padding: const EdgeInsets.all(28),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 340),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 84,
+                            height: 84,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: softSurface,
+                              border: Border.all(color: panelBorder),
+                            ),
+                            alignment: Alignment.center,
+                            child: HugeIcon(
+                              icon: HugeIcons.strokeRoundedLock,
+                              size: 34,
+                              color: brandAccentDeep,
+                            ),
+                          ),
+                          const SizedBox(height: 22),
+                          Text(
+                            'Cardy is locked',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.w700,
+                              color: ink,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Authenticate with your fingerprint, face or screen lock to view your saved cards.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: muted, height: 1.4),
+                          ),
+                          if (error != null) ...[
+                            const SizedBox(height: 14),
+                            Text(
+                              error!,
+                              textAlign: TextAlign.center,
+                              style:
+                                  TextStyle(color: colors.error, fontSize: 12),
+                            ),
+                          ],
+                          const SizedBox(height: 24),
+                          SizedBox(
+                            width: double.infinity,
+                            height: 50,
+                            child: FilledButton.icon(
+                              onPressed:
+                                  authenticating || checking ? null : onUnlock,
+                              style: FilledButton.styleFrom(
+                                backgroundColor: accentColor,
+                                foregroundColor: isCardyDarkMode
+                                    ? const Color(0xFF111111)
+                                    : Colors.white,
+                              ),
+                              icon: authenticating || checking
+                                  ? const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2),
+                                    )
+                                  : const HugeIcon(
+                                      icon: HugeIcons.strokeRoundedFingerPrint),
+                              label: Text(
+                                authenticating
+                                    ? 'Authenticating…'
+                                    : 'Unlock Cardy',
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                      icon: authenticating || checking
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const HugeIcon(
-                              icon: HugeIcons.strokeRoundedFingerPrint),
-                      label: Text(
-                        authenticating ? 'Authenticating…' : 'Unlock Cardy',
-                      ),
                     ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+                  )),
         ),
       ),
     );

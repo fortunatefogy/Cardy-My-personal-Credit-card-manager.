@@ -66,8 +66,7 @@ class _ComparePageState extends State<ComparePage> {
         .where((card) =>
             selectedCategory == null ||
             _categoriesOf(card).any((value) =>
-                value.trim().toLowerCase() ==
-                selectedCategory!.toLowerCase()))
+                value.trim().toLowerCase() == selectedCategory!.toLowerCase()))
         .map((card) => _evaluate(card, spend))
         .toList()
       ..sort((a, b) {
@@ -79,18 +78,15 @@ class _ComparePageState extends State<ComparePage> {
 
   _Result _evaluate(CreditCard card, double spend) {
     final entry = GeminiChatService.matchCatalogueEntry(card, _catalogue);
-    final cashbackPct = card.cashback > 0
-        ? card.cashback
-        : (entry?.cashbackRate ?? 0);
+    final cashbackPct =
+        card.cashback > 0 ? card.cashback : (entry?.cashbackRate ?? 0);
     final userPointsPct = card.rewardRate > 0 && card.pointValue > 0
         ? card.rewardRate / 100 * card.pointValue
         : 0.0;
     final catalogRate = _pointsRatePercent(entry);
-    final pointsPct =
-        userPointsPct > 0 ? userPointsPct : (catalogRate ?? 0.0);
+    final pointsPct = userPointsPct > 0 ? userPointsPct : (catalogRate ?? 0.0);
     final known = cashbackPct > 0 || pointsPct > 0;
-    final paired =
-        card.rewardsStack && cashbackPct > 0 && pointsPct > 0;
+    final paired = card.rewardsStack && cashbackPct > 0 && pointsPct > 0;
     final effectivePct = paired
         ? cashbackPct + pointsPct
         : (cashbackPct > pointsPct ? cashbackPct : pointsPct);
@@ -112,8 +108,7 @@ class _ComparePageState extends State<ComparePage> {
 
   double? _pointsRatePercent(CardCatalogEntry? entry) {
     if (entry == null) return null;
-    final currency =
-        (entry.details['Reward Currency'] ?? '').toLowerCase();
+    final currency = (entry.details['Reward Currency'] ?? '').toLowerCase();
     final isCashback = entry.category.toLowerCase() == 'cashback' ||
         currency.contains('cashback');
     if (isCashback) return null;
@@ -299,7 +294,10 @@ class _ComparePageState extends State<ComparePage> {
             const SizedBox(height: 6),
             Text(
               'Base reward rate ${r.entry!.details['Base Reward Rate']} from CardTrail'
-              '${(() { final label = _checkedLabel(r.entry!); return label == null ? '' : ' (checked $label)'; })()}',
+              '${(() {
+                final label = _checkedLabel(r.entry!);
+                return label == null ? '' : ' (checked $label)';
+              })()}',
               style: TextStyle(color: muted, fontSize: 11),
             ),
           ],

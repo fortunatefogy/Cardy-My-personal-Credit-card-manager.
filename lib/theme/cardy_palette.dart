@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 final ValueNotifier<bool> cardyDarkMode = ValueNotifier(false);
+final ValueNotifier<bool> biometricLockEnabled = ValueNotifier(true);
 
 bool get isCardyDarkMode => cardyDarkMode.value;
 Color get appBackground =>

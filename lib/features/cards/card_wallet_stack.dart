@@ -1,24 +1,23 @@
 import 'dart:ui' show lerpDouble;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
-import 'credit_card.dart';
-
-class CardWalletStack extends StatefulWidget {
+class CardWalletStack<T> extends StatefulWidget {
   const CardWalletStack({
     super.key,
     required this.cards,
     required this.cardBuilder,
   });
 
-  final List<CreditCard> cards;
-  final Widget Function(CreditCard card, double width, bool front) cardBuilder;
+  final List<T> cards;
+  final Widget Function(T card, double width, bool front) cardBuilder;
 
   @override
-  State<CardWalletStack> createState() => _CardWalletStackState();
+  State<CardWalletStack<T>> createState() => _CardWalletStackState<T>();
 }
 
-class _CardWalletStackState extends State<CardWalletStack>
+class _CardWalletStackState<T> extends State<CardWalletStack<T>>
     with SingleTickerProviderStateMixin {
   static const _peek = 46.0;
   static const _visibleDistance = 3.5;
@@ -56,6 +55,7 @@ class _CardWalletStackState extends State<CardWalletStack>
         final width = (constraints.maxWidth * .86).clamp(260.0, 360.0);
         return GestureDetector(
           behavior: HitTestBehavior.translucent,
+          dragStartBehavior: DragStartBehavior.down,
           onVerticalDragStart: (_) => _snap.stop(),
           onVerticalDragUpdate: (details) => setState(() {
             _position = (_position - details.delta.dy / _peek)
@@ -95,7 +95,9 @@ class _CardWalletStackState extends State<CardWalletStack>
   Widget _layer(int index, double offset, double width) {
     final distance = offset.abs();
     final front = distance < .5;
-    final tile = widget.cardBuilder(widget.cards[index], width, front);
+    final tile = RepaintBoundary(
+      child: widget.cardBuilder(widget.cards[index], width, front),
+    );
     return Transform.translate(
       offset: Offset(0, offset * _peek),
       child: Transform.scale(

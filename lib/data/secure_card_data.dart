@@ -22,7 +22,8 @@ class SecureCardData {
     required String cvv,
   }) async =>
       (await _channel.invokeMethod<String>('encrypt', {
-        'plaintext': jsonEncode({'number': number, 'expiry': expiry, 'cvv': cvv}),
+        'plaintext':
+            jsonEncode({'number': number, 'expiry': expiry, 'cvv': cvv}),
       }))!;
 
   static Future<Map<String, String>> decrypt(String payload) async {
