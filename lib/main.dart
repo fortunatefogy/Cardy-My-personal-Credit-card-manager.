@@ -22,6 +22,7 @@ import 'features/cards/card_catalogue.dart';
 import 'features/cards/card_catalogue_page.dart';
 import 'features/assistant/ai_chat_page.dart';
 import 'features/compare/compare_page.dart';
+import 'features/security/app_lock.dart';
 import 'features/cards/card_search_delegate.dart';
 import 'theme/cardy_palette.dart';
 import 'features/cards/card_number_boxes.dart';
@@ -129,6 +130,8 @@ class CardyApp extends StatelessWidget {
             ),
           ),
           themeMode: darkMode ? ThemeMode.dark : ThemeMode.light,
+          builder: (context, child) =>
+              AppLockGate(child: child ?? const SizedBox.shrink()),
           home: const CardyHome(),
         ),
       );

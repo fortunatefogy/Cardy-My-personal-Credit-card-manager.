@@ -31,12 +31,14 @@ class CardCatalogEntry {
         'category': category,
         'summary': summary,
         'details_json': jsonEncode(details),
-        'checked_at': (checkedAt ?? DateTime.now()).toUtc().millisecondsSinceEpoch,
+        'checked_at':
+            (checkedAt ?? DateTime.now()).toUtc().millisecondsSinceEpoch,
         'details_checked_at': detailsCheckedAt?.toUtc().millisecondsSinceEpoch,
       };
 
   factory CardCatalogEntry.fromRow(Map<String, Object?> row) {
-    final rawDetails = jsonDecode(row['details_json'] as String) as Map<String, dynamic>;
+    final rawDetails =
+        jsonDecode(row['details_json'] as String) as Map<String, dynamic>;
     return CardCatalogEntry(
       slug: row['slug'] as String,
       name: row['name'] as String,
@@ -45,10 +47,15 @@ class CardCatalogEntry {
       category: row['category'] as String,
       summary: row['summary'] as String,
       details: rawDetails.map((key, value) => MapEntry(key, value.toString())),
-      checkedAt: DateTime.fromMillisecondsSinceEpoch(row['checked_at'] as int, isUtc: true).toLocal(),
+      checkedAt: DateTime.fromMillisecondsSinceEpoch(row['checked_at'] as int,
+              isUtc: true)
+          .toLocal(),
       detailsCheckedAt: row['details_checked_at'] == null
           ? null
-          : DateTime.fromMillisecondsSinceEpoch(row['details_checked_at'] as int, isUtc: true).toLocal(),
+          : DateTime.fromMillisecondsSinceEpoch(
+                  row['details_checked_at'] as int,
+                  isUtc: true)
+              .toLocal(),
     );
   }
 
@@ -59,7 +66,8 @@ class CardCatalogEntry {
     Map<String, String>? details,
     DateTime? checkedAt,
     DateTime? detailsCheckedAt,
-  }) => CardCatalogEntry(
+  }) =>
+      CardCatalogEntry(
         slug: slug,
         name: name,
         bank: bank ?? this.bank,
@@ -73,16 +81,42 @@ class CardCatalogEntry {
 
   String get displayBank => bank.isEmpty ? 'Issuer not listed' : bank;
   double? get annualFee => _money(details['Annual Fee']);
+  double? get forexMarkup => _percent(details['Forex Markup']);
+  double? get cardTrailScore => _score(details['CardTrail Score']);
+  String? get imageUrl => details['Image'] == null
+      ? null
+      : 'https://cardtrail.in${details['Image']}';
+
   double? get cashbackRate {
-    final description = '${details['Reward Currency'] ?? ''} ${details['About This Card'] ?? ''}'.toLowerCase();
-    if (!description.contains('cashback')) return null;
-    final match = RegExp(r'(\d+(?:\.\d+)?)\s*%').firstMatch(details['Base Reward Rate'] ?? '');
+    final description =
+        '${details['Reward Currency'] ?? ''} ${details['About This Card'] ?? ''}'
+            .toLowerCase();
+    final isCashbackCategory = category.toLowerCase() == 'cashback';
+    if (!isCashbackCategory && !description.contains('cashback')) return null;
+    final match = RegExp(r'(\d+(?:\.\d+)?)\s*%')
+        .firstMatch(details['Base Reward Rate'] ?? '');
     return match == null ? null : double.tryParse(match.group(1)!);
   }
 
   static double? _money(String? value) {
     if (value == null) return null;
-    final match = RegExp(r'(\d[\d,]*(?:\.\d+)?)').firstMatch(value.replaceAll('₹', ''));
-    return match == null ? null : double.tryParse(match.group(1)!.replaceAll(',', ''));
+    final match =
+        RegExp(r'(\d[\d,]*(?:\.\d+)?)').firstMatch(value.replaceAll('₹', ''));
+    return match == null
+        ? null
+        : double.tryParse(match.group(1)!.replaceAll(',', ''));
+  }
+
+  static double? _percent(String? value) {
+    if (value == null) return null;
+    final match = RegExp(r'(\d+(?:\.\d+)?)\s*%').firstMatch(value);
+    return match == null ? null : double.tryParse(match.group(1)!);
+  }
+
+  static double? _score(String? value) {
+    if (value == null) return null;
+    final match =
+        RegExp(r'(\d+(?:\.\d+)?)\s*(?:/\s*10|out of 10)').firstMatch(value);
+    return match == null ? null : double.tryParse(match.group(1)!);
   }
 }

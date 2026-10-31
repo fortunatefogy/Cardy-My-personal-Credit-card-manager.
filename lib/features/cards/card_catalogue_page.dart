@@ -176,6 +176,7 @@ class _CardCataloguePageState extends State<CardCataloguePage> {
                               const SizedBox(height: 9),
                           itemBuilder: (context, index) {
                             final card = visible[index];
+                            final fee = card.annualFee;
                             return Card(
                               child: ListTile(
                                 leading: CircleAvatar(
@@ -187,10 +188,23 @@ class _CardCataloguePageState extends State<CardCataloguePage> {
                                     maxLines: 2,
                                     overflow: TextOverflow.ellipsis),
                                 subtitle: Text(
-                                    '${card.displayBank}${card.category.isEmpty ? '' : ' · ${card.category}'}',
+                                    '${card.displayBank}'
+                                    '${card.category.isEmpty ? '' : ' · ${card.category}'}'
+                                    '${fee == null || fee <= 0 ? '' : ' · ₹${fee.toStringAsFixed(0)} fee'}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                     style: TextStyle(color: muted)),
-                                trailing: const HugeIcon(
-                                    icon: HugeIcons.strokeRoundedArrowRight01),
+                                trailing: card.cardTrailScore == null
+                                    ? const HugeIcon(
+                                        icon:
+                                            HugeIcons.strokeRoundedArrowRight01)
+                                    : Text(
+                                        card.cardTrailScore!.toStringAsFixed(1),
+                                        style: TextStyle(
+                                            color: isCardyDarkMode
+                                                ? const Color(0xFF7DE0A1)
+                                                : const Color(0xFF0B7A45),
+                                            fontWeight: FontWeight.w700)),
                                 onTap: () async {
                                   final selected = await Navigator.of(context)
                                       .push<CardCatalogEntry>(
@@ -278,6 +292,24 @@ class _CardCatalogueDetailPageState extends State<_CardCatalogueDetailPage> {
                       '${_entry.displayBank}${_entry.category.isEmpty ? '' : ' · ${_entry.category}'}',
                       style: TextStyle(color: muted)),
                   const SizedBox(height: 14),
+                  if (_entry.imageUrl != null) ...[
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(16),
+                      child: Image.network(
+                        _entry.imageUrl!,
+                        height: 170,
+                        width: double.infinity,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text('Card artwork provided by CardTrail',
+                          style: TextStyle(color: muted, fontSize: 11)),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
                   if (_error != null)
                     _notice(
                         'Could not refresh details. ${_entry.details.isEmpty ? _error : 'Showing cached details.'}'),
@@ -294,8 +326,9 @@ class _CardCatalogueDetailPageState extends State<_CardCatalogueDetailPage> {
                     _notice(
                         'No detailed data was available in the page. You can still add the card and edit its details.'),
                   const SizedBox(height: 16),
-                  _notice(
-                      'Card details are sourced from CardTrail and may differ from current issuer terms. Confirm fees and benefits with the issuer before relying on them.'),
+                  _notice('Card details are sourced from CardTrail'
+                      '${_entry.detailsCheckedAt == null ? '' : ' · last checked ${_entry.detailsCheckedAt!.day}/${_entry.detailsCheckedAt!.month}/${_entry.detailsCheckedAt!.year}'}'
+                      ' and may differ from current issuer terms. Confirm fees and benefits with the issuer before relying on them.'),
                   const SizedBox(height: 12),
                   OutlinedButton.icon(
                     onPressed: () => launchUrl(Uri.parse(_entry.detailUrl),

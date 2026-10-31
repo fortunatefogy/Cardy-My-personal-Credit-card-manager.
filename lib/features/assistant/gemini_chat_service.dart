@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../data/secure_card_data.dart';
+import '../cards/card_catalogue.dart';
+import '../cards/card_catalogue_service.dart';
 import '../cards/credit_card.dart';
 
 class GeminiChatService {
@@ -34,6 +36,7 @@ class GeminiChatService {
     required String apiKey,
     required List<CreditCard> cards,
     required List<({String role, String text})> history,
+    List<CardCatalogEntry> catalogue = const [],
   }) async {
     final cardContext = cards.isEmpty
         ? 'No saved cards are available.'
@@ -50,6 +53,7 @@ class GeminiChatService {
                   'Status: ${card.active ? 'active' : 'inactive'}',
                 ].join('\n'))
             .join('\n\n');
+    final catalogueContext = _catalogueContext(cards, catalogue);
 
     var recentHistory =
         history.skipWhile((message) => message.role != 'user').toList();
@@ -87,10 +91,20 @@ class GeminiChatService {
           'parts': [
             {
               'text':
-                  '''You are Cardy, a helpful assistant for an Indian user who manages credit cards in this app. Answer general questions using your general knowledge, including questions about purchases, travel, movies, shopping, and how to use card benefits. When a user asks which card to use, recommend only among the saved cards listed below and use their saved benefit settings as the reliable source for card-specific rates and terms. You may offer general context about common card or merchant practices, but label it as general guidance, not a verified benefit of a particular saved card. Do not claim that an offer is currently active, or invent specific bank benefits, fees, caps, exclusions, or eligibility rules. If the user asks about a current offer or a card-specific benefit not included below, explain that you cannot verify it live and suggest checking the bank or merchant terms. If the saved data is insufficient to make a reliable comparison, say what is missing. For savings comparisons, show a simple calculation from the saved rates and remind the user that caps, exclusions, and offer eligibility may not be represented. Do not ask for, repeat, or infer full card numbers, expiry dates, CVVs, PINs, or OTPs. Be concise, friendly, and answer the user's actual question directly.
+                  '''You are Cardy, a helpful assistant for an Indian user who manages credit cards in this app. Answer general questions using your general knowledge, including questions about purchases, travel, movies, shopping, and how to use card benefits.
+
+There are two data sections:
+1. Saved card profiles — the user's own card benefit settings. Treat these as the user's authoritative data for their cards.
+2. CardTrail catalogue reference — data scraped from cardtrail.in. For each saved card there may be a matched catalogue block with field-by-field details and a checked date; after that there is a one-line index of the wider catalogue of Indian credit cards.
+
+When a user asks which card to use for a purchase (movies, flights, groceries, travel and so on): first reason from their saved cards together with the matched CardTrail details, picking the card that best fits the spending category, reward rate, point value, and fees. If none of the saved cards fit well, you may compare against the wider catalogue index to suggest a better card, clearly saying it is a card they do not have yet.
+
+Treat the saved benefit settings as overriding the CardTrail catalogue when they differ. When quoting catalogue specifics, cite the checked date if shown. Never claim a merchant offer or discount is active; describe only what the card's standing earning structure implies and label merchant offers as "worth double-checking". Do not claim a currently active offer, or invent specific bank benefits, fees, caps, exclusions, or eligibility rules beyond the sections below. If the user asks about a current offer or a benefit not included below, explain that you cannot verify it live and suggest checking the bank or merchant terms. If the data is insufficient for a reliable comparison, say what is missing. For savings comparisons, show a simple calculation from the sections below and remind the user that caps, exclusions, and offer eligibility may not be represented. Do not ask for, repeat, or infer full card numbers, expiry dates, CVVs, PINs, or OTPs. Be concise, friendly, and answer the user's actual question directly.
 
 Saved card profiles:
-$cardContext''',
+$cardContext
+
+$catalogueContext''',
             }
           ],
         },
@@ -136,6 +150,96 @@ $cardContext''',
       client.close(force: true);
     }
   }
+
+  static String _catalogueContext(
+      List<CreditCard> cards, List<CardCatalogEntry> catalogue) {
+    if (catalogue.isEmpty) {
+      return 'CardTrail catalogue reference: not available right now.';
+    }
+    final blocks = <String>[];
+    for (final card in cards) {
+      final entry = matchCatalogueEntry(card, catalogue);
+      final title = card.nickname.isEmpty ? card.name : card.nickname;
+      if (entry == null) {
+        blocks
+            .add('Saved card "$title": no matching CardTrail catalogue entry.');
+        continue;
+      }
+      blocks.add([
+        'Saved card "$title" matches CardTrail entry "${entry.name}" (${entry.bank}):',
+        if (entry.category.isNotEmpty) 'Category: ${entry.category}',
+        if (entry.summary.isNotEmpty) 'About: ${entry.summary}',
+        for (final key in entry.details.keys) '$key: ${entry.details[key]}',
+        if (_checkedLabel(entry) != null)
+          'Checked: ${_checkedLabel(entry)} (dd/mm/yyyy)',
+        'More: ${entry.detailUrl}',
+      ].join('\n'));
+    }
+    final index = catalogue
+        .map((entry) => [
+              '${entry.slug} — ${entry.name} (${entry.bank.isEmpty ? 'unlisted bank' : entry.bank})',
+              if (entry.category.isNotEmpty) entry.category,
+              if (entry.annualFee != null)
+                'AF ₹${entry.annualFee!.toStringAsFixed(0)}',
+              if (entry.forexMarkup != null)
+                'fx ${entry.forexMarkup!.toStringAsFixed(entry.forexMarkup! == entry.forexMarkup!.roundToDouble() ? 0 : 1)}%',
+              if (entry.cardTrailScore != null)
+                'score ${entry.cardTrailScore!.toStringAsFixed(1)}',
+            ].join(' | '))
+        .join('\n');
+    return [
+      'CardTrail catalogue reference (data from cardtrail.in):',
+      ...blocks,
+      'Full catalogue index (one card per line: slug — name (bank) | category | annual fee | forex % | score):',
+      index,
+    ].join('\n\n');
+  }
+
+  static String? _checkedLabel(CardCatalogEntry entry) {
+    final checked = entry.detailsCheckedAt ?? entry.checkedAt;
+    if (checked == null) return null;
+    final d = checked.day.toString().padLeft(2, '0');
+    final m = checked.month.toString().padLeft(2, '0');
+    return '$d/$m/${checked.year}';
+  }
+
+  static CardCatalogEntry? matchCatalogueEntry(
+      CreditCard card, List<CardCatalogEntry> catalogue) {
+    final cardBank =
+        CardCatalogueService.bankFromText('${card.bank} ${card.name}');
+    final cardTokens = _tokens('${card.bank} ${card.name}');
+    if (cardTokens.isEmpty) return null;
+    CardCatalogEntry? best;
+    var bestScore = 0;
+    for (final entry in catalogue) {
+      final entryBank =
+          CardCatalogueService.bankFromText('${entry.bank} ${entry.name}');
+      if (cardBank.isNotEmpty &&
+          entryBank.isNotEmpty &&
+          cardBank != entryBank) {
+        continue;
+      }
+      final entryTokens = _tokens('${entry.name} ${entry.slug} ${entry.bank}');
+      var score = cardTokens.where(entryTokens.contains).length;
+      final entryText = _normalize('${entry.name} ${entry.slug}');
+      if (entryText.contains(_normalize(card.name))) score += 2;
+      if (score > bestScore) {
+        bestScore = score;
+        best = entry;
+      }
+    }
+    return bestScore >= 2 ? best : null;
+  }
+
+  static final _tokenRegExp = RegExp(r'[a-z0-9]+');
+
+  static String _normalize(String text) =>
+      text.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();
+
+  static Set<String> _tokens(String text) => _tokenRegExp
+      .allMatches(text.toLowerCase())
+      .map((m) => m.group(0)!)
+      .toSet();
 }
 
 class GeminiChatException implements Exception {

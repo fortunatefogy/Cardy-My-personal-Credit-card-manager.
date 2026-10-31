@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:hugeicons/hugeicons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../cards/card_catalogue.dart';
+import '../cards/card_catalogue_service.dart';
 import '../cards/credit_card.dart';
 import 'gemini_chat_service.dart';
 
@@ -26,11 +28,22 @@ class _AiChatPageState extends State<AiChatPage> {
   bool _loadingKey = true;
   bool _sending = false;
   bool _hasKey = false;
+  List<CardCatalogEntry> _catalogue = const [];
 
   @override
   void initState() {
     super.initState();
     _restoreKey();
+    _loadCatalogue();
+  }
+
+  Future<void> _loadCatalogue() async {
+    try {
+      final entries = await CardCatalogueService.instance.list();
+      if (mounted) setState(() => _catalogue = entries);
+    } catch (_) {
+      // Chat still works from saved card data alone.
+    }
   }
 
   @override
@@ -150,6 +163,7 @@ class _AiChatPageState extends State<AiChatPage> {
         apiKey: key,
         cards: widget.cards,
         history: List.unmodifiable(_messages),
+        catalogue: _catalogue,
       );
       if (mounted)
         setState(() => _messages.add((role: 'assistant', text: answer)));
@@ -314,7 +328,9 @@ class _AiChatPageState extends State<AiChatPage> {
       Padding(
         padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
         child: Text(
-            'Messages and saved card benefit settings go to Google Gemini. The free tier may use submitted content to improve Google products. Card numbers, expiry dates, CVVs, and private notes are excluded.',
+            _catalogue.isEmpty
+                ? 'Messages and saved card benefit settings go to Google Gemini. The free tier may use submitted content to improve Google products. Card numbers, expiry dates, CVVs, and private notes are excluded.'
+                : 'Messages, saved card benefit settings, and CardTrail card catalogue data (from cardtrail.in) go to Google Gemini. Card numbers, expiry dates, CVVs, and private notes are excluded.',
             textAlign: TextAlign.center,
             style: TextStyle(color: colors.onSurfaceVariant, fontSize: 10)),
       ),
