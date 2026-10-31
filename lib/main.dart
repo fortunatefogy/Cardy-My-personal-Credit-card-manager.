@@ -388,6 +388,8 @@ class _CardyHomeState extends State<CardyHome> {
   Widget _dashboard() {
     final activeCards =
         cards.asMap().entries.where((entry) => entry.value.active).toList();
+    final favoriteCards =
+        activeCards.where((entry) => entry.value.favorite).toList();
     final hour = DateTime.now().hour;
     final greeting = hour < 12
         ? 'Good morning,'
@@ -571,7 +573,7 @@ class _CardyHomeState extends State<CardyHome> {
             ),
           ],
           const SizedBox(height: 27),
-          _sectionTitle('Your Cards',
+          _sectionTitle(favoriteCards.isEmpty ? 'Your Cards' : 'Favorites',
               action: 'See all', onTap: () => setState(() => tab = 1)),
           const SizedBox(height: 12),
           if (activeCards.isEmpty)
@@ -583,23 +585,98 @@ class _CardyHomeState extends State<CardyHome> {
               onTap: _editCard,
             )
           else
-            SizedBox(
-              height: 220,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: activeCards.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 12),
-                itemBuilder: (context, i) => _cardTile(
-                  activeCards[i].value,
-                  width: 300,
-                  styleSeed: activeCards[i].value.styleSeed,
-                ),
-              ),
+            _homeCardStack(
+              (favoriteCards.isEmpty ? activeCards : favoriteCards)
+                  .take(5)
+                  .map((entry) => entry.value)
+                  .toList(),
             ),
         ],
       ),
     );
   }
+
+  Widget _homeCardStack(List<CreditCard> stack) => LayoutBuilder(
+        builder: (context, constraints) {
+          const peek = 48.0;
+          const inset = 14.0;
+          const pocketHeight = 118.0;
+          final width = constraints.maxWidth;
+          final cardWidth = width - inset * 2;
+          final hump = width * .075;
+          final pocketTop =
+              inset + peek * (stack.length - 1) + cardWidth * .63 * .5;
+          return Container(
+            width: width,
+            height: pocketTop + pocketHeight,
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: isCardyDarkMode
+                  ? const Color(0xFF1A1B1E)
+                  : const Color(0xFF3A3A40),
+              borderRadius: BorderRadius.circular(28),
+            ),
+            child: Stack(
+              children: [
+                for (var i = 0; i < stack.length; i++)
+                  Positioned(
+                    top: inset + i * peek,
+                    left: inset,
+                    width: cardWidth,
+                    child: _cardTile(
+                      stack[i],
+                      width: cardWidth,
+                      styleSeed: stack[i].styleSeed,
+                      showCaption: false,
+                      onTap: () =>
+                          _cardDetails(stack[i], cards.indexOf(stack[i])),
+                    ),
+                  ),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  top: pocketTop - hump,
+                  bottom: 0,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => setState(() => tab = 1),
+                    child: CustomPaint(
+                      painter: _WalletPocketPainter(
+                        hump: hump,
+                        color: bottomBarBackground,
+                      ),
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(20, hump + 20, 20, 18),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              '${cards.length} saved ${cards.length == 1 ? 'card' : 'cards'}',
+                              style: TextStyle(
+                                color: bottomBarSelected,
+                                fontSize: 22,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            Text(
+                              'View wallet',
+                              style: TextStyle(
+                                color: bottomBarUnselected,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      );
 
   Widget _myCards() {
     final banks = cards
@@ -2212,17 +2289,32 @@ class _CardyHomeState extends State<CardyHome> {
                           artworkPath: c.artworkPath,
                         ),
                       ),
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: TextButton.icon(
-                          onPressed: () =>
-                              setDetails(() => showBack = !showBack),
-                          icon: HugeIcon(
-                              icon: showBack
-                                  ? HugeIcons.strokeRoundedCreditCard
-                                  : HugeIcons.strokeRoundedFlipHorizontal),
-                          label: Text(showBack ? 'Show front' : 'Show back'),
-                        ),
+                      Row(
+                        children: [
+                          IconButton(
+                            tooltip: c.favorite
+                                ? 'Remove from favorites'
+                                : 'Add to favorites',
+                            onPressed: () async {
+                              await _setFavorite(c, !c.favorite);
+                              setDetails(() {});
+                            },
+                            icon: HugeIcon(
+                              icon: HugeIcons.strokeRoundedFavourite,
+                              color: c.favorite ? Colors.redAccent : muted,
+                            ),
+                          ),
+                          const Spacer(),
+                          TextButton.icon(
+                            onPressed: () =>
+                                setDetails(() => showBack = !showBack),
+                            icon: HugeIcon(
+                                icon: showBack
+                                    ? HugeIcons.strokeRoundedCreditCard
+                                    : HugeIcons.strokeRoundedFlipHorizontal),
+                            label: Text(showBack ? 'Show front' : 'Show back'),
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 16),
                       Container(
@@ -2462,6 +2554,31 @@ class _CardyHomeState extends State<CardyHome> {
     }
   }
 
+  Future<void> _setFavorite(CreditCard card, bool favorite) async {
+    final previous = card.favorite;
+    card.favorite = favorite;
+    if (mounted) setState(() {});
+    try {
+      final database = await LocalDatabase.instance.database;
+      if (card.databaseId != null) {
+        await database.update(
+          'cards',
+          {'is_favorite': favorite ? 1 : 0},
+          where: 'id = ?',
+          whereArgs: [card.databaseId],
+        );
+      }
+    } catch (error) {
+      card.favorite = previous;
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not update favorite: $error')),
+        );
+      }
+    }
+  }
+
   Future<bool> _confirmDelete(
       CreditCard card, BuildContext detailContext) async {
     final confirmed = await showDialog<bool>(
@@ -2592,4 +2709,40 @@ class _CardyHomeState extends State<CardyHome> {
           ],
         ),
       );
+}
+
+class _WalletPocketPainter extends CustomPainter {
+  _WalletPocketPainter({required this.hump, required this.color});
+
+  final double hump;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final h = size.height;
+    final path = Path()
+      ..moveTo(0, hump)
+      ..lineTo(w * .09, hump)
+      ..cubicTo(w * .15, hump, w * .16, 0, w * .22, 0)
+      ..lineTo(w * .78, 0)
+      ..cubicTo(w * .84, 0, w * .85, hump, w * .91, hump)
+      ..lineTo(w, hump)
+      ..lineTo(w, h)
+      ..lineTo(0, h)
+      ..close();
+    canvas.drawShadow(path, Colors.black.withValues(alpha: .4), 8, false);
+    canvas.drawPath(path, Paint()..color = color);
+    canvas.drawPath(
+      path,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1
+        ..color = Colors.white.withValues(alpha: .12),
+    );
+  }
+
+  @override
+  bool shouldRepaint(_WalletPocketPainter oldDelegate) =>
+      oldDelegate.hump != hump || oldDelegate.color != color;
 }

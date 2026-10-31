@@ -19,6 +19,7 @@ class CreditCard {
     this.styleSeed = -1,
     this.databaseId,
     this.artworkPath,
+    this.favorite = false,
   });
 
   String bank, name, network, nickname, categories, notes;
@@ -28,6 +29,7 @@ class CreditCard {
   int styleSeed;
   int? databaseId;
   String? artworkPath;
+  bool favorite;
 
   Map<String, dynamic> toJson() => {
         'bank': bank,
@@ -45,6 +47,7 @@ class CreditCard {
         'rewardsStack': rewardsStack,
         'styleSeed': styleSeed,
         'artworkPath': artworkPath,
+        'favorite': favorite,
       };
 
   factory CreditCard.fromJson(Map<String, dynamic> json) => CreditCard(
@@ -63,6 +66,7 @@ class CreditCard {
         rewardsStack: json['rewardsStack'] ?? false,
         styleSeed: json['styleSeed'] ?? -1,
         artworkPath: json['artworkPath'],
+        favorite: json['favorite'] ?? false,
       );
 
   Map<String, Object?> toDatabase() => {
@@ -82,6 +86,7 @@ class CreditCard {
         'rewards_stack': rewardsStack ? 1 : 0,
         'style_seed': styleSeed,
         'artwork_path': artworkPath,
+        'is_favorite': favorite ? 1 : 0,
       };
 
   factory CreditCard.fromDatabase(Map<String, Object?> row) => CreditCard(
@@ -101,5 +106,6 @@ class CreditCard {
         rewardsStack: row['rewards_stack'] == 1,
         styleSeed: row['style_seed'] as int? ?? -1,
         artworkPath: row['artwork_path'] as String?,
+        favorite: row['is_favorite'] == 1,
       );
 }

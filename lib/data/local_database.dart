@@ -10,7 +10,7 @@ class LocalDatabase {
     final directory = await getDatabasesPath();
     return openDatabase(
       p.join(directory, 'cardwise.db'),
-      version: 10,
+      version: 11,
       onConfigure: (db) async {
         await db.rawQuery('PRAGMA secure_delete = ON');
       },
@@ -31,6 +31,10 @@ class LocalDatabase {
         }
         if (oldVersion < 10) {
           await db.execute('ALTER TABLE cards ADD COLUMN artwork_path TEXT');
+        }
+        if (oldVersion < 11) {
+          await db.execute(
+              'ALTER TABLE cards ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0');
         }
       },
     );
@@ -53,7 +57,8 @@ class LocalDatabase {
       rewards_stack INTEGER NOT NULL DEFAULT 0 CHECK (rewards_stack IN (0, 1)),
       secure_details TEXT NOT NULL DEFAULT '',
       style_seed INTEGER NOT NULL DEFAULT -1,
-      artwork_path TEXT
+      artwork_path TEXT,
+      is_favorite INTEGER NOT NULL DEFAULT 0 CHECK (is_favorite IN (0, 1))
     )
   ''');
 
