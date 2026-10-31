@@ -1,8 +1,8 @@
-Project Prompt: CardWise AI — Smart Credit Card Manager for Android
+Project Prompt: Cardy — Smart Credit Card Manager for Android
 
 1. Project Overview
 
-Build a complete, production-quality Android application named CardWise AI, designed primarily for Indian users who own multiple credit cards.
+Build a complete, production-quality Android application named Cardy, designed primarily for Indian users who own multiple credit cards.
 
 The app should allow users to manage all their credit cards in one place, automatically discover current credit card offers from the internet, compare card benefits, and use an AI-powered chatbot to identify the best card for any purchase.
 

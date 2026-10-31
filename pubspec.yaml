@@ -1,4 +1,4 @@
-name: cardwise_ai
+name: cardy
 description: A private-first credit card benefits manager for India.
 publish_to: none
 version: 1.0.0+1
@@ -13,9 +13,21 @@ dependencies:
   html: ^0.15.5
   url_launcher: ^6.3.1
   cupertino_icons: ^1.0.8
+  u_credit_card: ^1.6.0
+  flutter_tilt: ^4.1.0
+  local_auth: ^2.3.0
+  card_scanner: ^1.0.4
+  hugeicons: ^1.2.0
+  salomon_bottom_bar: ^3.3.2
+  horizontal_credit_card: ^0.0.2
+  image_picker: ^1.1.2
+  animations: ^2.0.11
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
+dependency_overrides:
+  # u_credit_card 1.6.0 uses Matrix4.scaleByDouble, added after Flutter's pin.
+  vector_math: 2.2.0
 flutter:
   uses-material-design: true

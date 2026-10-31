@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/services.dart';
 
-/// Encrypts complete card details with the Android Keystore before local storage.
+/// Encrypts the PAN and expiry with the Android Keystore before local storage.
 class SecureCardData {
   static const _channel = MethodChannel('cardwise/secure_card_data');
 
@@ -19,10 +19,9 @@ class SecureCardData {
   static Future<String> encrypt({
     required String number,
     required String expiry,
-    required String cvv,
   }) async =>
       (await _channel.invokeMethod<String>('encrypt', {
-        'plaintext': jsonEncode({'number': number, 'expiry': expiry, 'cvv': cvv}),
+        'plaintext': jsonEncode({'number': number, 'expiry': expiry}),
       }))!;
 
   static Future<Map<String, String>> decrypt(String payload) async {
@@ -30,10 +29,13 @@ class SecureCardData {
       'payload': payload,
     });
     final decoded = jsonDecode(plaintext!) as Map<String, dynamic>;
-    return {
+    final details = <String, String>{
       'number': decoded['number'] as String? ?? '',
       'expiry': decoded['expiry'] as String? ?? '',
-      'cvv': decoded['cvv'] as String? ?? '',
     };
+    if (decoded.containsKey('cvv')) {
+      details['cvv'] = decoded['cvv'] as String? ?? '';
+    }
+    return details;
   }
 }
