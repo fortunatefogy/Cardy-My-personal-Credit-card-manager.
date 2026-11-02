@@ -221,9 +221,7 @@ class _CardCataloguePageState extends State<CardCataloguePage> {
                                               card.cardTrailScore!
                                                   .toStringAsFixed(1),
                                               style: TextStyle(
-                                                  color: isCardyDarkMode
-                                                      ? const Color(0xFF7DE0A1)
-                                                      : const Color(0xFF0B7A45),
+                                                  color: positiveColor,
                                                   fontWeight: FontWeight.w700)),
                                       onTap: () async {
                                         final selected =
@@ -313,7 +311,9 @@ class _CardCatalogueDetailPageState extends State<_CardCatalogueDetailPage> {
                       children: [
                         Text(_entry.name,
                             style: const TextStyle(
-                                fontSize: 25, fontWeight: FontWeight.w800)),
+                                fontFamily: cardyDisplayFont,
+                                fontSize: 25,
+                                fontWeight: FontWeight.w800)),
                         const SizedBox(height: 5),
                         Text(
                             '${_entry.displayBank}${_entry.category.isEmpty ? '' : ' · ${_entry.category}'}',
@@ -371,9 +371,7 @@ class _CardCatalogueDetailPageState extends State<_CardCatalogueDetailPage> {
                           onPressed: () => Navigator.pop(context, _entry),
                           style: FilledButton.styleFrom(
                               backgroundColor: accentColor,
-                              foregroundColor: isCardyDarkMode
-                                  ? const Color(0xFF171719)
-                                  : Colors.white),
+                              foregroundColor: onAccent),
                           icon: const HugeIcon(
                               icon: HugeIcons.strokeRoundedAdd01),
                           label: const Text('Add to my cards'),

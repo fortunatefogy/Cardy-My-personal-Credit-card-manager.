@@ -29,6 +29,8 @@ import 'features/identity/identity_document.dart';
 import 'widgets/app_dropdown.dart';
 import 'features/assistant/ai_chat_page.dart';
 import 'features/security/app_lock.dart';
+import 'features/settings/settings_page.dart';
+import 'features/splash/splash_gate.dart';
 import 'features/cards/card_search_delegate.dart';
 import 'theme/cardy_palette.dart';
 import 'features/cards/card_number_boxes.dart';
@@ -42,102 +44,29 @@ String _groupCardNumber(String value) {
   return groups.join(' ');
 }
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  final preferences = await SharedPreferences.getInstance();
+  biometricLockEnabled.value = preferences.getBool('biometric_lock') ?? true;
+  cardyColorThemeIndex.value = (preferences.getInt('color_theme') ?? 0)
+      .clamp(0, cardyColorThemes.length - 1);
   runApp(const CardyApp());
 }
 
 class CardyApp extends StatelessWidget {
   const CardyApp({super.key});
   @override
-  Widget build(BuildContext context) => ValueListenableBuilder<bool>(
-        valueListenable: cardyDarkMode,
-        builder: (context, darkMode, child) => MaterialApp(
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: Listenable.merge([cardyDarkMode, cardyColorThemeIndex]),
+        builder: (context, child) => MaterialApp(
           title: 'Cardy',
           debugShowCheckedModeBanner: false,
-          theme: ThemeData(
-            useMaterial3: true,
-            brightness: Brightness.light,
-            scaffoldBackgroundColor: const Color(0xFFF5F5F6),
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFF171719),
-              primary: const Color(0xFF171719),
-              secondary: const Color(0xFF55555C),
-              brightness: Brightness.light,
-              surface: Colors.white,
-            ),
-            appBarTheme: const AppBarTheme(
-              backgroundColor: Color(0xFFF5F5F6),
-              foregroundColor: Color(0xFF171719),
-              surfaceTintColor: Colors.transparent,
-              elevation: 0,
-            ),
-            inputDecorationTheme: InputDecorationTheme(
-              filled: true,
-              fillColor: Colors.white,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide: BorderSide.none,
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide: const BorderSide(color: Color(0xFFE7E7E9)),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide:
-                    const BorderSide(color: Color(0xFF303034), width: 1.4),
-              ),
-              hintStyle: const TextStyle(color: Color(0xFF77777E)),
-            ),
-            floatingActionButtonTheme: const FloatingActionButtonThemeData(
-              backgroundColor: Color(0xFF171719),
-              foregroundColor: Colors.white,
-            ),
+          theme: cardyThemeData(Brightness.light),
+          darkTheme: cardyThemeData(Brightness.dark),
+          themeMode: cardyDarkMode.value ? ThemeMode.dark : ThemeMode.light,
+          builder: (context, child) => SplashGate(
+            child: AppLockGate(child: child ?? const SizedBox.shrink()),
           ),
-          darkTheme: ThemeData(
-            useMaterial3: true,
-            brightness: Brightness.dark,
-            scaffoldBackgroundColor: const Color(0xFF101113),
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFFF0F0F1),
-              primary: const Color(0xFFF0F0F1),
-              secondary: const Color(0xFFBFC0C3),
-              brightness: Brightness.dark,
-              surface: const Color(0xFF1C1D20),
-            ),
-            appBarTheme: const AppBarTheme(
-              backgroundColor: Color(0xFF101113),
-              foregroundColor: Color(0xFFF3F3F4),
-              surfaceTintColor: Colors.transparent,
-              elevation: 0,
-            ),
-            inputDecorationTheme: InputDecorationTheme(
-              filled: true,
-              fillColor: const Color(0xFF1C1D20),
-              hintStyle: const TextStyle(color: Color(0xFFAAAAB0)),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide: BorderSide.none,
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide: const BorderSide(color: Color(0xFF35363A)),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide:
-                    const BorderSide(color: Color(0xFFF0F0F1), width: 1.4),
-              ),
-            ),
-            floatingActionButtonTheme: const FloatingActionButtonThemeData(
-              backgroundColor: Color(0xFFF0F0F1),
-              foregroundColor: Color(0xFF171719),
-            ),
-          ),
-          themeMode: darkMode ? ThemeMode.dark : ThemeMode.light,
-          builder: (context, child) =>
-              AppLockGate(child: child ?? const SizedBox.shrink()),
           home: const CardyHome(),
         ),
       );
@@ -181,8 +110,6 @@ class _CardyHomeState extends State<CardyHome> {
     try {
       final preferences = await SharedPreferences.getInstance();
       cardyDarkMode.value = preferences.getBool('dark_mode') ?? false;
-      biometricLockEnabled.value =
-          preferences.getBool('biometric_lock') ?? true;
       final database = await LocalDatabase.instance.database;
       var saved = (await database.query('cards', orderBy: 'id'))
           .map(CreditCard.fromDatabase)
@@ -383,8 +310,7 @@ class _CardyHomeState extends State<CardyHome> {
                       ? () => _editDebitCard()
                       : () => _editIdentity(),
               backgroundColor: accentColor,
-              foregroundColor:
-                  isCardyDarkMode ? const Color(0xFF111111) : Colors.white,
+              foregroundColor: onAccent,
               icon: const HugeIcon(icon: HugeIcons.strokeRoundedAdd01),
               label: Text(tab == 1
                   ? 'Add card'
@@ -480,6 +406,7 @@ class _CardyHomeState extends State<CardyHome> {
                             Text('Cardy',
                                 style: TextStyle(
                                     color: brandAccentDeep,
+                                    fontFamily: cardyDisplayFont,
                                     fontSize: 22,
                                     fontWeight: FontWeight.w800)),
                           ],
@@ -505,100 +432,6 @@ class _CardyHomeState extends State<CardyHome> {
                     ],
                   ),
                   const SizedBox(height: 20),
-                  Container(
-                    height: 142,
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(24),
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: isCardyDarkMode
-                            ? const [Color(0xFF393A3F), Color(0xFF1D1E21)]
-                            : const [Color(0xFF3B3B40), Color(0xFF171719)],
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: brandAccent.withValues(alpha: .26),
-                          blurRadius: 22,
-                          offset: const Offset(0, 10),
-                        ),
-                      ],
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(24),
-                      child: Stack(children: [
-                        Positioned(
-                          right: -20,
-                          top: -46,
-                          child: Container(
-                            width: 150,
-                            height: 150,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                  color: Colors.white.withValues(alpha: .13),
-                                  width: 24),
-                            ),
-                          ),
-                        ),
-                        Positioned(
-                          right: 54,
-                          bottom: -49,
-                          child: Container(
-                            width: 96,
-                            height: 96,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: Colors.white.withValues(alpha: .08),
-                            ),
-                          ),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(19, 17, 19, 16),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text('YOUR WALLET',
-                                  style: TextStyle(
-                                    color: Colors.white.withValues(alpha: .78),
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w700,
-                                    letterSpacing: 1.3,
-                                  )),
-                              const Spacer(),
-                              Row(
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  Text('${activeCards.length}',
-                                      style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 40,
-                                          height: 1,
-                                          fontWeight: FontWeight.w700)),
-                                  const SizedBox(width: 9),
-                                  const Padding(
-                                    padding: EdgeInsets.only(bottom: 4),
-                                    child: Text('active cards',
-                                        style: TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 14,
-                                            fontWeight: FontWeight.w600)),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 6),
-                              Text('${cards.length} cards saved in your wallet',
-                                  style: TextStyle(
-                                      color:
-                                          Colors.white.withValues(alpha: .78),
-                                      fontSize: 12)),
-                            ],
-                          ),
-                        ),
-                      ]),
-                    ),
-                  ),
-                  const SizedBox(height: 17),
                   Row(
                     children: [
                       Expanded(
@@ -616,18 +449,14 @@ class _CardyHomeState extends State<CardyHome> {
                     Container(
                       padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(
-                        color: isCardyDarkMode
-                            ? const Color(0xFF3B3021)
-                            : const Color(0xFFFFF2D9),
+                        color: warningSurface,
                         borderRadius: BorderRadius.circular(16),
                       ),
                       child: Row(
                         children: [
                           HugeIcon(
                             icon: HugeIcons.strokeRoundedCalendarOff,
-                            color: isCardyDarkMode
-                                ? const Color(0xFFFFC66D)
-                                : const Color(0xFF8A5A00),
+                            color: warningForeground,
                           ),
                           const SizedBox(width: 10),
                           Expanded(
@@ -669,9 +498,7 @@ class _CardyHomeState extends State<CardyHome> {
                       caption: 'SAVED CARDS',
                       total: cards.length,
                       onOpen: () => setState(() => tab = 1),
-                      backColor: isCardyDarkMode
-                          ? const Color(0xFF1A1B1E)
-                          : const Color(0xFF3A3A40),
+                      backColor: stackBack,
                       pocketColor: bottomBarBackground,
                     ),
                 ],
@@ -991,7 +818,10 @@ class _CardyHomeState extends State<CardyHome> {
             children: [
               const Text(
                 'Identity documents',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+                style: TextStyle(
+                    fontFamily: cardyDisplayFont,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w700),
               ),
               const SizedBox(height: 6),
               Text(
@@ -1427,9 +1257,7 @@ class _CardyHomeState extends State<CardyHome> {
                                   },
                                   style: FilledButton.styleFrom(
                                     backgroundColor: accentColor,
-                                    foregroundColor: isCardyDarkMode
-                                        ? const Color(0xFF111111)
-                                        : Colors.white,
+                                    foregroundColor: onAccent,
                                   ),
                                   child: Text(existing == null
                                       ? 'Save document'
@@ -1483,7 +1311,10 @@ class _CardyHomeState extends State<CardyHome> {
               children: [
                 const Text(
                   'Your wallet',
-                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+                  style: TextStyle(
+                      fontFamily: cardyDisplayFont,
+                      fontSize: 24,
+                      fontWeight: FontWeight.w700),
                 ),
                 const SizedBox(height: 6),
                 Text(
@@ -1680,7 +1511,10 @@ class _CardyHomeState extends State<CardyHome> {
             children: [
               const Text(
                 'Your debit cards',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+                style: TextStyle(
+                    fontFamily: cardyDisplayFont,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w700),
               ),
               const SizedBox(height: 6),
               Text(
@@ -2215,9 +2049,7 @@ class _CardyHomeState extends State<CardyHome> {
                                     },
                                     style: FilledButton.styleFrom(
                                       backgroundColor: accentColor,
-                                      foregroundColor: isCardyDarkMode
-                                          ? const Color(0xFF111111)
-                                          : Colors.white,
+                                      foregroundColor: onAccent,
                                     ),
                                     child: Text(existing == null
                                         ? 'Save debit card'
@@ -2281,11 +2113,7 @@ class _CardyHomeState extends State<CardyHome> {
                   child: HugeIcon(
                     icon: icon,
                     size: 19,
-                    color: filled
-                        ? (isCardyDarkMode
-                            ? const Color(0xFF171719)
-                            : Colors.white)
-                        : brandAccentDeep,
+                    color: filled ? onAccent : brandAccentDeep,
                   ),
                 ),
                 const SizedBox(height: 6),
@@ -2412,7 +2240,7 @@ class _CardyHomeState extends State<CardyHome> {
                   Text(
                     c.active ? 'ACTIVE' : 'PAUSED',
                     style: TextStyle(
-                      color: c.active ? const Color(0xFF7DE0A1) : muted,
+                      color: c.active ? positiveColor : muted,
                       fontSize: 10,
                       letterSpacing: 1,
                       fontWeight: FontWeight.w700,
@@ -3402,9 +3230,7 @@ class _CardyHomeState extends State<CardyHome> {
                                       },
                                       style: FilledButton.styleFrom(
                                         backgroundColor: accentColor,
-                                        foregroundColor: isCardyDarkMode
-                                            ? const Color(0xFF111111)
-                                            : Colors.white,
+                                        foregroundColor: onAccent,
                                       ),
                                       child: Text(
                                         existing == null
@@ -4116,53 +3942,8 @@ class _CardyHomeState extends State<CardyHome> {
   }
 
   void _openSettings() {
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: surface,
-      sheetAnimationStyle: const AnimationStyle(
-        duration: Duration(milliseconds: 360),
-        reverseDuration: Duration(milliseconds: 260),
-      ),
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ValueListenableBuilder<bool>(
-              valueListenable: cardyDarkMode,
-              builder: (context, darkMode, child) => SwitchListTile(
-                title: const Text('Dark mode'),
-                subtitle: const Text('Use a darker theme throughout Cardy.'),
-                secondary: HugeIcon(
-                    icon: darkMode
-                        ? HugeIcons.strokeRoundedMoon01
-                        : HugeIcons.strokeRoundedSun01),
-                value: darkMode,
-                onChanged: (value) async {
-                  cardyDarkMode.value = value;
-                  final preferences = await SharedPreferences.getInstance();
-                  await preferences.setBool('dark_mode', value);
-                },
-              ),
-            ),
-            ValueListenableBuilder<bool>(
-              valueListenable: biometricLockEnabled,
-              builder: (context, enabled, child) => SwitchListTile(
-                title: const Text('Biometric lock'),
-                subtitle: const Text(
-                    'Require fingerprint, face or screen lock to open Cardy.'),
-                secondary:
-                    const HugeIcon(icon: HugeIcons.strokeRoundedFingerPrint),
-                value: enabled,
-                onChanged: (value) async {
-                  biometricLockEnabled.value = value;
-                  final preferences = await SharedPreferences.getInstance();
-                  await preferences.setBool('biometric_lock', value);
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
+    Navigator.of(context).push<void>(
+      cardyPageRoute<void>((_) => const SettingsPage()),
     );
   }
 

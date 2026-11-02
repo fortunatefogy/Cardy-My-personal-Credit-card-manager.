@@ -131,7 +131,10 @@ class _ComparePageState extends State<ComparePage> {
         children: [
           const Text(
             'Best card finder',
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+            style: TextStyle(
+                fontFamily: cardyDisplayFont,
+                fontSize: 24,
+                fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 6),
           Text(
@@ -179,8 +182,7 @@ class _ComparePageState extends State<ComparePage> {
               label: const Text('Compare my cards'),
               style: FilledButton.styleFrom(
                 backgroundColor: accentColor,
-                foregroundColor:
-                    isCardyDarkMode ? const Color(0xFF111111) : Colors.white,
+                foregroundColor: onAccent,
               ),
             ),
           ),
@@ -271,7 +273,7 @@ class _ComparePageState extends State<ComparePage> {
                     ? '₹${r.savings.toStringAsFixed(0)} estimated rewards'
                     : 'No reward data',
                 style: TextStyle(
-                  color: r.known ? const Color(0xFF7DE0A1) : muted,
+                  color: r.known ? positiveColor : muted,
                   fontWeight: FontWeight.w700,
                 ),
               ),

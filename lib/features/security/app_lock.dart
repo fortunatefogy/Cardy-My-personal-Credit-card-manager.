@@ -30,6 +30,7 @@ class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    biometricLockEnabled.addListener(_onLockPreferenceChanged);
     if (!biometricLockEnabled.value) {
       _locked = false;
       _checkingAvailability = false;
@@ -40,8 +41,18 @@ class _AppLockGateState extends State<AppLockGate> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    biometricLockEnabled.removeListener(_onLockPreferenceChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  void _onLockPreferenceChanged() {
+    if (biometricLockEnabled.value || !_locked || !mounted) return;
+    setState(() {
+      _locked = false;
+      _authenticating = false;
+      _checkingAvailability = false;
+    });
   }
 
   @override
@@ -183,6 +194,7 @@ class _LockScreen extends StatelessWidget {
                             'Cardy is locked',
                             textAlign: TextAlign.center,
                             style: TextStyle(
+                              fontFamily: cardyDisplayFont,
                               fontSize: 24,
                               fontWeight: FontWeight.w700,
                               color: ink,
@@ -212,9 +224,7 @@ class _LockScreen extends StatelessWidget {
                                   authenticating || checking ? null : onUnlock,
                               style: FilledButton.styleFrom(
                                 backgroundColor: accentColor,
-                                foregroundColor: isCardyDarkMode
-                                    ? const Color(0xFF111111)
-                                    : Colors.white,
+                                foregroundColor: onAccent,
                               ),
                               icon: authenticating || checking
                                   ? const SizedBox(
